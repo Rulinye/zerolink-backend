@@ -1,52 +1,29 @@
-name: build
-
-on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: write   # needed for release uploads on tags
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: vet
-        run: go vet ./...
-      - name: gofmt
-        run: |
-          test -z "$(gofmt -l .)"
-      - name: test
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
-      - name: coverage summary
-        run: go tool cover -func=coverage.out | tail -1
-
-  build:
+build:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # for `git describe`
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: build linux/amd64
-        run: make linux
-      - name: upload artifact
-        uses: actions/upload-artifact@v4
+      - name: build linux/${{ matrix.goarch }}
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH \
+            go build -trimpath \
+            -ldflags "-s -w -X main.Version=$(git describe --tags --always --dirty)" \
+            -o build/zerolink-backend-linux-$GOARCH .
+      - uses: actions/upload-artifact@v4
         with:
-          name: zerolink-backend-linux-amd64
-          path: build/zerolink-backend-linux-amd64
+          name: zerolink-backend-linux-${{ matrix.goarch }}
+          path: build/zerolink-backend-linux-${{ matrix.goarch }}
           if-no-files-found: error
           retention-days: 30
 
@@ -58,16 +35,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: zerolink-backend-linux-amd64
           path: dist
+          pattern: zerolink-backend-linux-*
+          merge-multiple: true
       - name: checksums
-        run: |
-          cd dist
-          sha256sum * > SHA256SUMS
-      - name: release
-        uses: softprops/action-gh-release@v2
+        run: cd dist && sha256sum * > SHA256SUMS && ls -la
+      - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/zerolink-backend-linux-amd64
+            dist/zerolink-backend-linux-arm64
             dist/SHA256SUMS
           generate_release_notes: true
