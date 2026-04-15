@@ -18,9 +18,17 @@ all: build
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o build/$(BIN) .
 
-linux:
+.PHONY: linux linux-amd64 linux-arm64
+
+linux: linux-amd64 linux-arm64
+
+linux-amd64:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags "$(LDFLAGS)" -o build/$(BIN)-linux-amd64 .
+
+linux-arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+		go build -trimpath -ldflags "$(LDFLAGS)" -o build/$(BIN)-linux-arm64 .
 
 test:
 	go test -race -count=1 ./...
