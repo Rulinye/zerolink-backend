@@ -1,4 +1,35 @@
-build:
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write   # needed for release uploads on tags
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: vet
+        run: go vet ./...
+      - name: gofmt
+        run: |
+          test -z "$(gofmt -l .)"
+      - name: test
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+  build:
     needs: test
     runs-on: ubuntu-latest
     strategy:
@@ -7,7 +38,7 @@ build:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0   # for `git describe`
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -20,7 +51,8 @@ build:
             go build -trimpath \
             -ldflags "-s -w -X main.Version=$(git describe --tags --always --dirty)" \
             -o build/zerolink-backend-linux-$GOARCH .
-      - uses: actions/upload-artifact@v4
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: zerolink-backend-linux-${{ matrix.goarch }}
           path: build/zerolink-backend-linux-${{ matrix.goarch }}
@@ -39,8 +71,12 @@ build:
           pattern: zerolink-backend-linux-*
           merge-multiple: true
       - name: checksums
-        run: cd dist && sha256sum * > SHA256SUMS && ls -la
-      - uses: softprops/action-gh-release@v2
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          ls -la
+      - name: release
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/zerolink-backend-linux-amd64
