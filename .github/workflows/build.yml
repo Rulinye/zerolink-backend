@@ -3,83 +3,111 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
 permissions:
-  contents: write   # needed for release uploads on tags
+  contents: write
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: vet
-        run: go vet ./...
+      - run: go mod download
       - name: gofmt
         run: |
-          test -z "$(gofmt -l .)"
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt diff:"
+            echo "$out"
+            exit 1
+          fi
+      - name: vet
+        run: go vet ./...
       - name: test
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
-      - name: coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+        run: go test ./... -race -count=1
 
   build:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        goarch: [amd64, arm64]
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # for `git describe`
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: build linux/${{ matrix.goarch }}
-        env:
-          GOARCH: ${{ matrix.goarch }}
+      - name: build linux/${{ matrix.arch }}
+        run: make linux-${{ matrix.arch }} VERSION=${GITHUB_REF_NAME}
+
+      - name: list build output
+        run: ls -la bin/
+
+      - name: verify all three binaries exist
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH \
-            go build -trimpath \
-            -ldflags "-s -w -X main.Version=$(git describe --tags --always --dirty)" \
-            -o build/zerolink-backend-linux-$GOARCH .
-      - name: upload artifact
-        uses: actions/upload-artifact@v4
+          for name in zerolink-backend zerolink-backend-admin-create zerolink-backend-import-nodes; do
+            file="bin/${name}-linux-${{ matrix.arch }}"
+            if [ ! -f "$file" ]; then
+              echo "MISSING: $file"
+              exit 1
+            fi
+            echo "OK: $file ($(stat -c%s "$file") bytes)"
+          done
+
+      - name: checksum
+        working-directory: bin
+        run: sha256sum *-linux-${{ matrix.arch }} > SHA256SUMS-${{ matrix.arch }}.txt
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: zerolink-backend-linux-${{ matrix.goarch }}
-          path: build/zerolink-backend-linux-${{ matrix.goarch }}
+          name: release-${{ matrix.arch }}
+          path: |
+            bin/zerolink-backend-linux-${{ matrix.arch }}
+            bin/zerolink-backend-admin-create-linux-${{ matrix.arch }}
+            bin/zerolink-backend-import-nodes-linux-${{ matrix.arch }}
+            bin/SHA256SUMS-${{ matrix.arch }}.txt
           if-no-files-found: error
-          retention-days: 30
 
   release:
-    needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    needs: build
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          path: dist
-          pattern: zerolink-backend-linux-*
-          merge-multiple: true
-      - name: checksums
+          path: dl
+      - name: flatten
         run: |
-          cd dist
-          sha256sum * > SHA256SUMS
-          ls -la
-      - name: release
-        uses: softprops/action-gh-release@v2
+          mkdir -p release
+          find dl -type f -exec cp {} release/ \;
+          ls -la release/
+      - name: verify all 8 expected files present
+        run: |
+          set -e
+          for f in \
+            zerolink-backend-linux-amd64 \
+            zerolink-backend-linux-arm64 \
+            zerolink-backend-admin-create-linux-amd64 \
+            zerolink-backend-admin-create-linux-arm64 \
+            zerolink-backend-import-nodes-linux-amd64 \
+            zerolink-backend-import-nodes-linux-arm64 \
+            SHA256SUMS-amd64.txt \
+            SHA256SUMS-arm64.txt
+          do
+            test -f "release/$f" || { echo "MISSING: $f"; exit 1; }
+          done
+          echo "all 8 files present"
+      - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/zerolink-backend-linux-amd64
-            dist/zerolink-backend-linux-arm64
-            dist/SHA256SUMS
+          files: release/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
