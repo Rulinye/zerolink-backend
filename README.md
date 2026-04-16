@@ -1,135 +1,111 @@
 # zerolink-backend
 
-> 0-0link 项目控制面后端
-> Phase 0: 仅有 `/ping` 和 `/version` 两个端点
-> 维护人: @rulinye
+> The control-plane HTTP service for the 0-0link project.
+> Phase 1: invite-based registration, JWT sessions, node listing,
+> Clash-compatible subscription links, minimal admin web UI.
 
----
+## Quick reference
 
-## 这是什么
-
-部署在控制机(春川)上的 HTTP 服务,负责:
-
-- **当前 (Phase 0)**: 仅 `/ping` 健康检查 + `/version` 版本查询,验证部署链路
-- **未来 (Phase 1+)**: 用户/邀请码/节点下发/订阅链接/流量统计/管理 API
-
-按 0-0link 项目计划书 §2.4,本服务的节点列表事实来源是 `0-0link-infra` 仓库的 Ansible inventory。本仓库不在数据库里直接存节点。
-
----
-
-## 技术栈
-
-- Go 1.25+
-- `github.com/go-chi/chi/v5` 路由
-- `log/slog` 结构化日志(stdlib)
-- 无其他外部依赖
-
-选型理由见项目计划书 §6.3。
-
----
-
-## 本地开发
-
-### 前置
-
-- Go 1.25 或更新版本
-
-### 跑起来
-
-```bash
-make run
-# 或直接:
-go run . -listen 127.0.0.1:8080
-```
-
-然后:
-
-```bash
-$ curl -s http://127.0.0.1:8080/ping | jq
-{
-  "ok": true,
-  "service": "zerolink-backend",
-  "time": "2026-04-15T12:34:56Z"
-}
-
-$ curl -s http://127.0.0.1:8080/version | jq
-{
-  "version": "dev-a1b2c3d"
-}
-```
-
-### 测试
-
-```bash
-make test
-```
-
-### 跨平台编译(Linux/amd64,部署目标)
-
-```bash
-make linux
-# 产物: build/zerolink-backend-linux-amd64
-```
-
----
-
-## 命令行参数
-
-| 参数 | 默认值 | 说明 |
+| Endpoint | Auth | What it does |
 |---|---|---|
-| `-listen` | `127.0.0.1:8080` | 监听地址。Phase 0 默认仅本机访问,通过 SSH 隧道暴露 |
-| `-log-json` | `false` | 输出 JSON 日志(给 systemd/journal 用) |
+| `GET /ping` | none | health check |
+| `GET /version` | none | returns build version |
+| `GET /sub/{token}` | token = credential | Clash YAML subscription |
+| `POST /api/v1/auth/register` | invite code | create new user |
+| `POST /api/v1/auth/login` | none | get JWT |
+| `GET /api/v1/auth/me` | jwt | current user |
+| `POST /api/v1/auth/logout` | jwt | revoke current jti |
+| `GET /api/v1/nodes` | jwt | list enabled nodes |
+| `GET /api/v1/nodes/{id}/config` | jwt | full client params |
+| `GET /api/v1/subscriptions` | jwt | list your subs |
+| `POST /api/v1/subscriptions` | jwt | create new sub token |
+| `DELETE /api/v1/subscriptions/{token}` | jwt | revoke sub |
+| `GET /api/v1/admin/users` | jwt + admin | user list |
+| `POST /api/v1/admin/users/{id}/disable` | jwt + admin | enable/disable user |
+| `GET /api/v1/admin/invites` | jwt + admin | list invites |
+| `POST /api/v1/admin/invites` | jwt + admin | mint 1..50 invites |
+| `GET /api/v1/admin/nodes` | jwt + admin | full node list incl. config_json |
+| `GET /admin/*` | cookie | HTML admin UI |
 
----
+## Environment
 
-## 部署
+All config is via env vars, read by `internal/config`:
 
-部署由 `0-0link-infra` 仓库的 `roles/backend` 完成。简略流程:
+| Var | Default | Notes |
+|---|---|---|
+| `ZL_LISTEN` | `127.0.0.1:8080` | listen addr |
+| `ZL_DB_PATH` | `/var/lib/zerolink-backend/zerolink.db` | SQLite file |
+| `ZL_JWT_SECRET` | **required** | >=32 bytes |
+| `ZL_JWT_TTL` | `168h` | access token TTL (Go duration) |
+| `ZL_JWT_ISSUER` | `zerolink-backend` | JWT `iss` claim |
+| `ZL_ADMIN_UI` | `true` | toggle `/admin/*` |
+| `ZL_LOG_JSON` | `true` | JSON vs text slog handler |
 
-1. 推送 tag `vX.Y.Z` 到本仓库
-2. GitHub Actions 自动编译并发布二进制到 GitHub Release
-3. 在 `0-0link-infra` 的 `inventory/group_vars/all.yml` 改 `backend_version`
-4. 跑 `ansible-playbook playbooks/deploy-control.yml`
-5. 验证: 在管理机本地开 SSH 隧道访问
+## Local dev
 
 ```bash
-# 在管理机本地执行:
-ssh -N -L 8080:127.0.0.1:8080 ubuntu@168.107.55.126 &
-curl -s http://127.0.0.1:8080/ping
+make build           # compile to ./bin/
+make test            # go test -race ./...
+make run             # starts on 127.0.0.1:8080 with a dev DB in ./dev/
+make linux-amd64     # cross-compile for production (also: linux-arm64)
+make lint            # gofmt + go vet
 ```
 
----
+`make run` generates a throwaway 32-byte JWT secret for each launch.
 
-## 路线图
+## First admin user
 
-- [x] **Phase 0**: `/ping` + `/version`,可部署到春川,SSH 隧道访问 OK
-- [ ] **Phase 1**: SQLite + 用户注册/登录/JWT/邀请码/节点下发/订阅链接
-- [ ] **Phase 4**: 流量统计、限速、管理员 Web 界面
+The deploy creates **no users automatically**. After the playbook finishes:
 
-详见项目计划书 §4.4。
+```bash
+ssh ubuntu@<host>
+sudo -u zerolink /usr/local/bin/zerolink-backend-admin-create -u rulinye
+```
 
----
+Once an admin exists, mint invite codes via `POST /api/v1/admin/invites` (or
+through `/admin/invites` in the browser) and share them with users.
 
-## 仓库结构
+## Project layout
 
 ```
-zerolink-backend/
-├── main.go              ← HTTP 服务入口、所有 handler、graceful shutdown
-├── main_test.go         ← /ping /version 烟测
-├── go.mod
+.
+├── main.go                              # bootstrap: config → DB → server
+├── go.mod / go.sum
 ├── Makefile
-├── README.md
-├── .gitignore
-└── .github/workflows/
-    └── build.yml        ← test + linux/amd64 build + tag → release
+├── .github/workflows/build.yml          # CI: test → matrix amd64/arm64 → release
+├── cmd/
+│   ├── admin-create/                    # CLI: create or reset an admin
+│   └── import-nodes/                    # CLI: sync nodes table from JSON
+├── internal/
+│   ├── config/                          # env-var driven Config
+│   ├── storage/                         # SQLite, migrations, repos
+│   │   └── migrations/                  # 0001_init.{up,down}.sql
+│   ├── auth/                            # bcrypt + JWT + middleware
+│   ├── server/                          # HTTP handlers, routing, admin UI
+│   └── clash/                           # Clash YAML subscription renderer
+└── web/
+    ├── templates/                       # HTML for /admin/*
+    └── static/                          # CSS
 ```
 
-Phase 1 起会拆出 `internal/{auth,nodes,subscription,storage}` 等子包。
+## Deviations from the original plan
 
----
+- **No `golang-migrate/migrate`.** With one migration file and zero schema
+  diffs in flight, a 30-line handwritten runner (`internal/storage/db.go`)
+  reads `migrations/*.up.sql` from `embed.FS` in lexical order and tracks
+  applied versions in `schema_migrations`. The table layout matches what
+  golang-migrate uses, so swapping in is trivial when Phase 4 introduces
+  schema diffs.
 
-## 安全注意
+- **No ORM.** All SQL is hand-written, parameterized via `database/sql`.
+  See `internal/storage/users.go` for the pattern.
 
-- ⚠️ Phase 0 的 `/ping` **没有认证**,所以坚决只听 `127.0.0.1`,不开公网。
-- Phase 1 加 JWT 中间件后,`/api/v1/*` 才会要求 token,但 `/ping` 仍然保持无认证(用于探活)。
-- 任何敏感配置(JWT secret, admin 密码 hash) 走 Ansible Vault,不进本仓库。
+- **No HTML layout/partial templates.** Each `web/templates/*.html` is a
+  full document with copy-pasted nav. The admin UI is small enough that
+  keeping each page self-contained is less mental overhead than fighting
+  `html/template`'s `define`/`template` semantics.
+
+## Phase 1 deliverable
+
+See [`docs/phase-1-completion.md`](../docs/phase-1-completion.md) for the
+full report, decision log, known issues, and Phase 2 handover.

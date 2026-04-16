@@ -1,16 +1,17 @@
-// Command zerolink-backend is the control plane for 0-0link.
+// Command zerolink-backend serves the JSON API and admin UI for the
+// 0-0link service. See README.md for endpoint details.
 //
-// Phase 0: serves a single GET /ping endpoint to validate the deployment
-// pipeline. Real auth, node management, and traffic accounting are added
-// in phase 1.
+// Phase 0 carryover: the -version flag prints the build-time version string
+// and exits 0. The Ansible role uses this to detect the installed version.
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"embed"
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,158 +20,152 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/rulinye/zerolink-backend/internal/auth"
+	"github.com/rulinye/zerolink-backend/internal/config"
+	"github.com/rulinye/zerolink-backend/internal/server"
+	"github.com/rulinye/zerolink-backend/internal/storage"
 )
 
-// Version is overridden at build time via -ldflags "-X main.Version=...".
-// When building from source without ldflags, we fall back to VCS info from debug.ReadBuildInfo().
-var Version = "dev"
+// Version is injected at link time via:
+//
+//	-ldflags="-X main.Version=v1.2.3"
+//
+// When unset (e.g. `go run`), versionString() falls back to the VCS info
+// embedded by the Go toolchain since 1.18, then to "dev".
+var Version = ""
+
+//go:embed web/templates/*.html
+var templatesFS embed.FS
+
+//go:embed web/static
+var staticFS embed.FS
 
 func main() {
-	var (
-		listen      = flag.String("listen", "127.0.0.1:8080", "address to listen on (host:port)")
-		logJSON     = flag.Bool("log-json", false, "emit logs as JSON (default: human-readable)")
-		showVersion = flag.Bool("version", false, "print version and exit (used by ansible for upgrade detection)")
-	)
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.Parse()
 
-	if *showVersion {
+	if showVersion {
 		fmt.Println(versionString())
 		return
 	}
 
-	// Logger setup. JSON in production (systemd/journal will index it),
-	// text in dev.
-	var handler slog.Handler
-	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
-	if *logJSON {
-		handler = slog.NewJSONHandler(os.Stderr, opts)
-	} else {
-		handler = slog.NewTextHandler(os.Stderr, opts)
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
 	}
-	logger := slog.New(handler).With("service", "zerolink-backend", "version", versionString())
-	slog.SetDefault(logger)
+}
 
-	logger.Info("starting", "listen", *listen)
-
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
-	r.Use(requestLogger(logger))
-
-	r.Get("/ping", handlePing)
-	r.Get("/version", handleVersion)
-
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           r,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	logger := newLogger(cfg.LogJSON)
+	logger.Info("starting",
+		"version", versionString(),
+		"listen", cfg.Listen,
+		"db", cfg.DBPath,
+	)
+
+	db, err := storage.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	signer, err := auth.NewSigner(cfg.JWTSecret, cfg.JWTTTL, cfg.JWTIssuer)
+	if err != nil {
+		return fmt.Errorf("new signer: %w", err)
+	}
+
+	// Sub-FS for templates so handlers reference "login.html", not
+	// "web/templates/login.html".
+	tplSub, err := fs.Sub(templatesFS, "web/templates")
+	if err != nil {
+		return err
+	}
+	tpl, err := server.LoadTemplatesFS(tplSub)
+	if err != nil {
+		return fmt.Errorf("load templates: %w", err)
+	}
+
+	// Same for static.
+	staticSub, err := fs.Sub(staticFS, "web/static")
+	if err != nil {
+		return err
+	}
+
+	srv := server.New(cfg, db, signer, logger, tpl, staticSub)
+	srv.Version = versionString()
+
+	ctx, cancel := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	srv.RunGC(ctx)
+
+	httpSrv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-		close(errCh)
+		logger.Info("listening", "addr", cfg.Listen)
+		errCh <- httpSrv.ListenAndServe()
 	}()
 
 	select {
-	case err := <-errCh:
-		logger.Error("listen failed", "err", err)
-		os.Exit(1)
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("listen: %w", err)
+		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", "err", err)
-		os.Exit(1)
+	shutdownCtx, shutdownCancel := context.WithTimeout(
+		context.Background(), 15*time.Second)
+	defer shutdownCancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("graceful shutdown failed", "err", err)
 	}
-	logger.Info("stopped cleanly")
+	logger.Info("stopped")
+	return nil
 }
 
-// handlePing returns a static OK payload. Used by humans (curl), Ansible
-// post-deploy verification, and any future health checker.
-func handlePing(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"service": "zerolink-backend",
-		"time":    time.Now().UTC().Format(time.RFC3339),
-	})
-}
-
-// handleVersion returns build/version metadata. Useful for verifying that
-// the deployed binary matches the expected commit.
-func handleVersion(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"version": versionString(),
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		// Client probably disconnected — nothing useful we can do.
-		slog.Default().Warn("write json failed", "err", err)
+// newLogger returns a slog.Logger using JSON or text output. JSON in
+// production (journald-friendly), text in dev for human reading.
+func newLogger(jsonOut bool) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	if jsonOut {
+		return slog.New(slog.NewJSONHandler(os.Stderr, opts))
 	}
+	return slog.New(slog.NewTextHandler(os.Stderr, opts))
 }
 
-// requestLogger logs each request's method, path, status, and duration
-// using slog. We don't use chi's built-in middleware.Logger because it
-// writes to log.Default() instead of slog.
-func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-			next.ServeHTTP(ww, r)
-			logger.Info("http",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", ww.Status(),
-				"bytes", ww.BytesWritten(),
-				"dur_ms", time.Since(start).Milliseconds(),
-				"req_id", middleware.GetReqID(r.Context()),
-			)
-		})
-	}
-}
-
+// versionString returns Version if set, otherwise the VCS revision from
+// runtime/debug, otherwise "dev". Mirrors Phase 0 main.go.
 func versionString() string {
-	if Version != "dev" {
+	if Version != "" {
 		return Version
 	}
-	if info, ok := debug.ReadBuildInfo(); ok {
-		var rev, modified string
-		for _, s := range info.Settings {
-			switch s.Key {
-			case "vcs.revision":
-				rev = s.Value
-				if len(rev) > 7 {
-					rev = rev[:7]
-				}
-			case "vcs.modified":
-				if s.Value == "true" {
-					modified = "+dirty"
-				}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" && s.Value != "" {
+			rev := s.Value
+			if len(rev) > 12 {
+				rev = rev[:12]
 			}
-		}
-		if rev != "" {
-			return fmt.Sprintf("dev-%s%s", rev, modified)
+			return "dev-" + rev
 		}
 	}
-	return Version
+	return "dev"
 }

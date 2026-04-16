@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>zerolink admin · invites</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="topnav">
+    <span class="brand">zerolink</span>
+    <a href="/admin/">dashboard</a>
+    <a class="active" href="/admin/invites">invites</a>
+    <a href="/admin/users">users</a>
+    <a href="/admin/nodes">nodes</a>
+    <a class="right" href="/admin/logout">logout</a>
+  </nav>
+  <main>
+    <h1>invites</h1>
+    <form method="post" action="/admin/invites" class="row">
+      <input name="note" type="text" placeholder="note (e.g. 'for alice')">
+      <button type="submit">+ create invite (7 day TTL)</button>
+    </form>
+    <table>
+      <thead>
+        <tr><th>code</th><th>note</th><th>created</th><th>expires</th><th>used by</th></tr>
+      </thead>
+      <tbody>
+        {{ range .Invites }}
+        <tr class="{{ if .IsConsumed }}used{{ else if .IsExpired }}expired{{ end }}">
+          <td><code>{{ .Code }}</code></td>
+          <td>{{ .Note }}</td>
+          <td>{{ .CreatedAt.Format "2006-01-02 15:04" }}</td>
+          <td>{{ .ExpiresAt.Format "2006-01-02 15:04" }}</td>
+          <td>
+            {{ if .UsedBy }}#{{ .UsedBy }}{{ else if .IsExpired }}<span class="muted">expired</span>{{ else }}<span class="ok">unused</span>{{ end }}
+          </td>
+        </tr>
+        {{ else }}
+        <tr><td colspan="5" class="muted">no invites yet</td></tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

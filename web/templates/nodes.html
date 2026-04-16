@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>zerolink admin · nodes</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="topnav">
+    <span class="brand">zerolink</span>
+    <a href="/admin/">dashboard</a>
+    <a href="/admin/invites">invites</a>
+    <a href="/admin/users">users</a>
+    <a class="active" href="/admin/nodes">nodes</a>
+    <a class="right" href="/admin/logout">logout</a>
+  </nav>
+  <main>
+    <h1>nodes</h1>
+    <p class="muted">Source of truth: Ansible inventory. Edit there, then run <code>ansible-playbook playbooks/deploy-control.yml</code> to re-sync.</p>
+    <table>
+      <thead>
+        <tr><th>id</th><th>name</th><th>region</th><th>address</th><th>port</th><th>protocol</th><th>enabled</th><th>updated</th></tr>
+      </thead>
+      <tbody>
+        {{ range .Nodes }}
+        <tr class="{{ if not .IsEnabled }}used{{ end }}">
+          <td>{{ .ID }}</td>
+          <td>{{ .Name }}</td>
+          <td>{{ .Region }}</td>
+          <td>{{ .Address }}</td>
+          <td>{{ .Port }}</td>
+          <td>{{ .Protocol }}</td>
+          <td>{{ if .IsEnabled }}✓{{ end }}</td>
+          <td>{{ .UpdatedAt.Format "2006-01-02 15:04" }}</td>
+        </tr>
+        {{ else }}
+        <tr><td colspan="8" class="muted">no nodes synced yet</td></tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

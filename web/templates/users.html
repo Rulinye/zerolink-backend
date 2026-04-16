@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>zerolink admin · users</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="topnav">
+    <span class="brand">zerolink</span>
+    <a href="/admin/">dashboard</a>
+    <a href="/admin/invites">invites</a>
+    <a class="active" href="/admin/users">users</a>
+    <a href="/admin/nodes">nodes</a>
+    <a class="right" href="/admin/logout">logout</a>
+  </nav>
+  <main>
+    <h1>users</h1>
+    <table>
+      <thead>
+        <tr><th>id</th><th>username</th><th>admin</th><th>disabled</th><th>created</th><th>last login</th></tr>
+      </thead>
+      <tbody>
+        {{ range .Users }}
+        <tr class="{{ if .IsDisabled }}used{{ end }}">
+          <td>{{ .ID }}</td>
+          <td>{{ .Username }}</td>
+          <td>{{ if .IsAdmin }}✓{{ end }}</td>
+          <td>{{ if .IsDisabled }}✓{{ end }}</td>
+          <td>{{ .CreatedAt.Format "2006-01-02 15:04" }}</td>
+          <td>{{ if .LastLoginAt }}{{ .LastLoginAt.Format "2006-01-02 15:04" }}{{ end }}</td>
+        </tr>
+        {{ else }}
+        <tr><td colspan="6" class="muted">no users yet</td></tr>
+        {{ end }}
+      </tbody>
+    </table>
+    <p class="muted">To disable a user, use <code>POST /api/v1/admin/users/&lt;id&gt;/disable</code> with body <code>{"disabled": true}</code>.</p>
+  </main>
+</body>
+</html>
