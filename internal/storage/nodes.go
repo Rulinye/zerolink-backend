@@ -80,6 +80,18 @@ func (r *NodeRepo) Get(ctx context.Context, id int64) (*Node, error) {
 	return scanNode(row)
 }
 
+// GetByName loads a node by its unique name. Returns ErrNotFound if missing.
+// Used by the import-nodes CLI to detect whether an upsert would actually
+// change anything, so Ansible's `changed_when` can report honestly.
+func (r *NodeRepo) GetByName(ctx context.Context, name string) (*Node, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, name, region, address, port, protocol, config_json,
+		       is_enabled, sort_order, updated_at
+		FROM nodes WHERE name = ?
+	`, name)
+	return scanNode(row)
+}
+
 // List returns nodes ordered by sort_order, name. If onlyEnabled is true,
 // disabled nodes are filtered out (this is what end users see).
 func (r *NodeRepo) List(ctx context.Context, onlyEnabled bool) ([]*Node, error) {

@@ -14,11 +14,6 @@
 //
 // The tool upserts every entry by `name` and deletes any node whose name is
 // not in the file (per phase-1-handover §8.3: source of truth is inventory).
-//
-// Usage from Ansible:
-//
-//   - copy: src=nodes.json dest=/etc/zerolink-backend/nodes.json
-//   - command: /usr/local/bin/zerolink-backend-import-nodes -db /var/lib/zerolink-backend/zerolink.db -in /etc/zerolink-backend/nodes.json
 package main
 
 import (
@@ -27,9 +22,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/rulinye/zerolink-backend/internal/storage"
 )
+
+// Version is injected at link time via -ldflags="-X main.Version=v1.2.3".
+var Version = ""
 
 type entry struct {
 	Name      string         `json:"name"`
@@ -38,17 +37,23 @@ type entry struct {
 	Port      int            `json:"port"`
 	Protocol  string         `json:"protocol"`
 	Config    map[string]any `json:"config"`
-	Enabled   *bool          `json:"enabled"` // pointer so default = enabled
+	Enabled   *bool          `json:"enabled"`
 	SortOrder int            `json:"sort_order"`
 }
 
 func main() {
 	var (
-		dbPath = flag.String("db", "/var/lib/zerolink-backend/zerolink.db", "SQLite path")
-		inPath = flag.String("in", "", "path to nodes.json")
-		dryRun = flag.Bool("dry-run", false, "print plan, do not modify DB")
+		dbPath      = flag.String("db", "/var/lib/zerolink-backend/zerolink.db", "SQLite path")
+		inPath      = flag.String("in", "", "path to nodes.json")
+		dryRun      = flag.Bool("dry-run", false, "print plan, do not modify DB")
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	if *inPath == "" {
 		fmt.Fprintln(os.Stderr, "-in is required")
@@ -81,10 +86,8 @@ func main() {
 
 	if *dryRun {
 		fmt.Println("DRY RUN. Would upsert:")
-		keep := make([]string, len(entries))
-		for i, e := range entries {
+		for _, e := range entries {
 			fmt.Printf("  + %s (%s:%d %s)\n", e.Name, e.Address, e.Port, e.Protocol)
-			keep[i] = e.Name
 		}
 		fmt.Println("Would delete any node not in the list above.")
 		return
@@ -98,7 +101,10 @@ func main() {
 	defer db.Close()
 
 	ctx := context.Background()
-	keep := make([]string, 0, len(entries))
+
+	// Count rows that actually change so the tool can report accurately.
+	// This lets the Ansible role's changed_when reflect reality.
+	upsertedChanged := 0
 	for _, e := range entries {
 		cfgJSON, err := json.Marshal(e.Config)
 		if err != nil {
@@ -113,6 +119,20 @@ func main() {
 		if sortOrder == 0 {
 			sortOrder = 100
 		}
+
+		// Compare against existing row; only count as changed if fields differ.
+		existing, err := db.Nodes.GetByName(ctx, e.Name)
+		changed := true
+		if err == nil && existing != nil {
+			changed = existing.Address != e.Address ||
+				existing.Port != e.Port ||
+				existing.Region != e.Region ||
+				existing.Protocol != e.Protocol ||
+				existing.ConfigJSON != string(cfgJSON) ||
+				existing.IsEnabled != enabled ||
+				existing.SortOrder != sortOrder
+		}
+
 		err = db.Nodes.Upsert(ctx, &storage.Node{
 			Name:       e.Name,
 			Region:     e.Region,
@@ -127,13 +147,39 @@ func main() {
 			fmt.Fprintf(os.Stderr, "upsert %s: %v\n", e.Name, err)
 			os.Exit(1)
 		}
-		keep = append(keep, e.Name)
+		if changed {
+			upsertedChanged++
+		}
 	}
 
+	keep := make([]string, 0, len(entries))
+	for _, e := range entries {
+		keep = append(keep, e.Name)
+	}
 	deleted, err := db.Nodes.DeleteMissing(ctx, keep)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "delete missing:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("import-nodes: upserted=%d deleted=%d\n", len(keep), deleted)
+	fmt.Printf("import-nodes: upserted=%d deleted=%d\n", upsertedChanged, deleted)
+}
+
+func versionString() string {
+	if Version != "" {
+		return Version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" && s.Value != "" {
+			rev := s.Value
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return "dev-" + rev
+		}
+	}
+	return "dev"
 }

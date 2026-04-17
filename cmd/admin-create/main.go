@@ -7,8 +7,7 @@
 //	zerolink-backend-admin-create -db /var/lib/zerolink-backend/zerolink.db -u rulinye
 //	# password prompt follows
 //
-// Designed for systemd's StandardInput=tty + manual `systemctl run` is not
-// realistic; instead the operator runs this directly over SSH:
+// Designed for the operator to run directly over SSH:
 //
 //	ssh ubuntu@chuncheon
 //	sudo -u zerolink /usr/local/bin/zerolink-backend-admin-create -u rulinye
@@ -21,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -30,13 +30,24 @@ import (
 	"golang.org/x/term"
 )
 
+// Version is injected at link time via -ldflags="-X main.Version=v1.2.3".
+// Matches the main server binary so the Ansible role can reliably detect
+// which release is installed across all three binaries.
+var Version = ""
+
 func main() {
 	var (
-		dbPath = flag.String("db", "/var/lib/zerolink-backend/zerolink.db", "SQLite path")
-		user   = flag.String("u", "", "username to create or update")
-		force  = flag.Bool("force", false, "if user exists, reset password instead of failing")
+		dbPath      = flag.String("db", "/var/lib/zerolink-backend/zerolink.db", "SQLite path")
+		user        = flag.String("u", "", "username to create or update")
+		force       = flag.Bool("force", false, "if user exists, reset password instead of failing")
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	if *user == "" {
 		fmt.Fprintln(os.Stderr, "-u username is required")
@@ -70,7 +81,6 @@ func main() {
 	existing, err := db.Users.GetByUsername(ctx, *user)
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
-		// New user.
 		uid, err := db.Users.Insert(ctx, &storage.User{
 			Username:     *user,
 			PasswordHash: hash,
@@ -85,14 +95,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "lookup:", err)
 		os.Exit(1)
 	default:
-		// Existing user.
 		if !*force {
 			fmt.Fprintf(os.Stderr,
 				"user %q already exists (id=%d). Re-run with -force to reset password.\n",
 				existing.Username, existing.ID)
 			os.Exit(1)
 		}
-		// SQLite has no UPDATE...RETURNING in older versions; do it raw.
 		if _, err := db.Conn().ExecContext(ctx,
 			`UPDATE users SET password_hash = ?, is_admin = 1, is_disabled = 0 WHERE id = ?`,
 			hash, existing.ID); err != nil {
@@ -104,8 +112,6 @@ func main() {
 	}
 }
 
-// readPassword prompts twice on a terminal (no echo). When stdin is not a tty
-// (e.g. piped from `echo`) it reads one line directly.
 func readPassword() (string, error) {
 	if term.IsTerminal(int(syscall.Stdin)) {
 		fmt.Fprint(os.Stderr, "password: ")
@@ -125,10 +131,30 @@ func readPassword() (string, error) {
 		}
 		return string(p1), nil
 	}
-	// Non-tty: useful for `printf 'pw\n' | admin-create ...` in tests.
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
 		return "", errors.New("no input")
 	}
 	return strings.TrimRight(scanner.Text(), "\r\n"), nil
+}
+
+// versionString mirrors the server binary: -ldflags wins, else VCS info, else "dev".
+func versionString() string {
+	if Version != "" {
+		return Version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" && s.Value != "" {
+			rev := s.Value
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return "dev-" + rev
+		}
+	}
+	return "dev"
 }
