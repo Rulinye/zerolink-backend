@@ -22,8 +22,8 @@ import (
 
 	"github.com/rulinye/zerolink-backend/internal/auth"
 	"github.com/rulinye/zerolink-backend/internal/config"
-	"github.com/rulinye/zerolink-backend/internal/server"
 	"github.com/rulinye/zerolink-backend/internal/cron"
+	"github.com/rulinye/zerolink-backend/internal/server"
 	"github.com/rulinye/zerolink-backend/internal/storage"
 )
 

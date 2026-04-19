@@ -59,7 +59,9 @@ func seedAdmin(t *testing.T, s *Server) int64 {
 	}
 	u, err := s.db.Users.Create(t.Context(), "admin", hash, true)
 	var id int64
-	if u != nil { id = u.ID }
+	if u != nil {
+		id = u.ID
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

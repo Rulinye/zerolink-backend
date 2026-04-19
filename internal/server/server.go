@@ -70,7 +70,6 @@ func New(cfg *config.Config, db *storage.DB, signer *auth.Signer, log *slog.Logg
 // Handler returns the chi router as http.Handler.
 func (s *Server) Handler() http.Handler { return s.router }
 
-
 // requestLogger emits a structured slog line per request. Mirrors the Phase 0
 // pattern from the existing main.go middleware.
 func (s *Server) requestLogger() func(http.Handler) http.Handler {

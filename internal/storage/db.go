@@ -13,13 +13,13 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
-	"context"
 	"strings"
 	"time"
 
@@ -157,15 +157,14 @@ func applyMigrations(db *sql.DB) error {
 	return nil
 }
 
-
 // ExecForCleanup runs a direct SQL statement. Use only for one-off cleanups
 // where a dedicated repo method would be overkill (e.g. DELETE FROM users
 // WHERE id=? in admin handlers). Never use for user-facing flows.
 func (d *DB) ExecForCleanup(query string, args ...any) (int64, error) {
-    res, err := d.conn.ExecContext(context.Background(), query, args...)
-    if err != nil {
-        return 0, err
-    }
-    n, _ := res.RowsAffected()
-    return n, nil
+	res, err := d.conn.ExecContext(context.Background(), query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

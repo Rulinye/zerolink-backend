@@ -117,11 +117,11 @@ func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 	}
 
 	sub, err := s.db.Subscriptions.Create(r.Context(), c.UserID, req.Name)
-if err != nil {
-    writeError(w, http.StatusInternalServerError, "insert subscription failed")
-    return
-}
-writeJSON(w, http.StatusOK, viewOf(r, sub))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "insert subscription failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(r, sub))
 }
 
 func (s *Server) handleListSubscriptions(w http.ResponseWriter, r *http.Request) {
