@@ -23,6 +23,7 @@ import (
 	"github.com/rulinye/zerolink-backend/internal/auth"
 	"github.com/rulinye/zerolink-backend/internal/config"
 	"github.com/rulinye/zerolink-backend/internal/server"
+	"github.com/rulinye/zerolink-backend/internal/cron"
 	"github.com/rulinye/zerolink-backend/internal/storage"
 )
 
@@ -105,6 +106,7 @@ func run() error {
 	defer cancel()
 
 	srv.RunGC(ctx)
+	cron.Run(ctx, db, logger)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,

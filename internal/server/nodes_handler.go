@@ -116,17 +116,12 @@ func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	tok, err := newOpaqueToken()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "token generation failed")
-		return
-	}
-	sub := &storage.Subscription{Token: tok, UserID: c.UserID, Name: req.Name}
-	if err := s.db.Subscriptions.Insert(r.Context(), sub); err != nil {
-		writeError(w, http.StatusInternalServerError, "insert subscription failed")
-		return
-	}
-	writeJSON(w, http.StatusCreated, viewOf(r, sub))
+	sub, err := s.db.Subscriptions.Create(r.Context(), c.UserID, req.Name)
+if err != nil {
+    writeError(w, http.StatusInternalServerError, "insert subscription failed")
+    return
+}
+writeJSON(w, http.StatusOK, viewOf(r, sub))
 }
 
 func (s *Server) handleListSubscriptions(w http.ResponseWriter, r *http.Request) {

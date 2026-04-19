@@ -70,74 +70,6 @@ func New(cfg *config.Config, db *storage.DB, signer *auth.Signer, log *slog.Logg
 // Handler returns the chi router as http.Handler.
 func (s *Server) Handler() http.Handler { return s.router }
 
-func (s *Server) buildRouter() chi.Router {
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(s.requestLogger())
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
-
-	// Unauthenticated routes.
-	r.Get("/ping", s.handlePing)
-	r.Get("/version", s.handleVersion)
-	r.Get("/sub/{token}", s.handleSubscriptionFetch)
-
-	// JSON API.
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Post("/auth/register", s.handleRegister)
-		r.Post("/auth/login", s.handleLogin)
-
-		r.Group(func(r chi.Router) {
-			r.Use(auth.Middleware(s.signer, s.db.Users, s.db.Tokens))
-
-			r.Get("/auth/me", s.handleMe)
-			r.Post("/auth/logout", s.handleLogout)
-
-			r.Get("/nodes", s.handleListNodes)
-			r.Get("/nodes/{id}/config", s.handleNodeConfig)
-
-			r.Get("/subscriptions", s.handleListSubscriptions)
-			r.Post("/subscriptions", s.handleCreateSubscription)
-			r.Delete("/subscriptions/{token}", s.handleRevokeSubscription)
-
-			r.Group(func(r chi.Router) {
-				r.Use(auth.AdminOnly)
-
-				r.Get("/admin/users", s.handleAdminListUsers)
-				r.Post("/admin/users/{id}/disable", s.handleAdminToggleUser)
-
-				r.Get("/admin/invites", s.handleAdminListInvites)
-				r.Post("/admin/invites", s.handleAdminCreateInvite)
-
-				r.Get("/admin/nodes", s.handleAdminListNodes)
-			})
-		})
-	})
-
-	// Admin HTML UI.
-	if s.cfg.AdminUIEnabled {
-		r.Route("/admin", func(r chi.Router) {
-			r.Get("/login", s.handleUILogin)
-			r.Post("/login", s.handleUILoginSubmit)
-			r.Get("/logout", s.handleUILogout)
-
-			r.Group(func(r chi.Router) {
-				r.Use(s.cookieAuthMiddleware)
-				r.Get("/", s.handleUIDashboard)
-				r.Get("/invites", s.handleUIInvites)
-				r.Post("/invites", s.handleUICreateInvite)
-				r.Get("/users", s.handleUIUsers)
-				r.Get("/nodes", s.handleUINodes)
-			})
-		})
-		// Static assets (CSS).
-		r.Handle("/static/*", http.StripPrefix("/static/",
-			http.FileServer(http.FS(s.staticFS))))
-	}
-
-	return r
-}
 
 // requestLogger emits a structured slog line per request. Mirrors the Phase 0
 // pattern from the existing main.go middleware.
@@ -191,7 +123,7 @@ func (s *Server) RunGC(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				n, err := s.db.Tokens.GC(ctx)
+				n, err := s.db.Tokens.GCExpired(ctx)
 				if err != nil {
 					s.log.Warn("revoked tokens GC failed", "err", err)
 					continue

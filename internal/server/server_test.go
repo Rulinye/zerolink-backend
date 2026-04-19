@@ -57,9 +57,9 @@ func seedAdmin(t *testing.T, s *Server) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.db.Users.Insert(t.Context(), &storage.User{
-		Username: "admin", PasswordHash: hash, IsAdmin: true,
-	})
+	u, err := s.db.Users.Create(t.Context(), "admin", hash, true)
+	var id int64
+	if u != nil { id = u.ID }
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestFullFlow(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("admin login status=%d body=%s", resp.StatusCode, body)
 	}
-	var login loginResp
+	var login authResp
 	if err := json.Unmarshal(body, &login); err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +126,8 @@ func TestFullFlow(t *testing.T) {
 
 	// 2) Admin creates an invite.
 	resp, body = doJSON(t, "POST", url+"/api/v1/admin/invites",
-		map[string]any{"note": "for-alice", "ttl_hours": 24, "count": 1}, adminTok)
-	if resp.StatusCode != 201 {
+		map[string]any{"note": "for-alice", "expires_in_days": 7, "count": 1}, adminTok)
+	if resp.StatusCode != 200 {
 		t.Fatalf("create invite status=%d body=%s", resp.StatusCode, body)
 	}
 	var inviteResp struct {
@@ -147,7 +147,7 @@ func TestFullFlow(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("register status=%d body=%s", resp.StatusCode, body)
 	}
-	var reg registerResp
+	var reg authResp
 	if err := json.Unmarshal(body, &reg); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestFullFlow(t *testing.T) {
 	// 8) Alice creates a subscription.
 	resp, body = doJSON(t, "POST", url+"/api/v1/subscriptions",
 		map[string]string{"name": "macbook"}, aliceTok)
-	if resp.StatusCode != 201 {
+	if resp.StatusCode != 200 {
 		t.Fatalf("create sub failed: status=%d body=%s", resp.StatusCode, body)
 	}
 	var sv subView
@@ -213,7 +213,7 @@ func TestFullFlow(t *testing.T) {
 
 	// 10) Logout: revoking the token should make /me 401 next time.
 	resp, body = doJSON(t, "POST", url+"/api/v1/auth/logout", nil, aliceTok)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != 204 {
 		t.Fatalf("logout failed: %d %s", resp.StatusCode, body)
 	}
 	resp, _ = doJSON(t, "GET", url+"/api/v1/auth/me", nil, aliceTok)
@@ -228,9 +228,7 @@ func TestNonAdmin_CannotAccessAdminEndpoints(t *testing.T) {
 
 	// Make a non-admin user directly.
 	hash, _ := auth.HashPassword("plebpw12")
-	_, err := s.db.Users.Insert(t.Context(), &storage.User{
-		Username: "pleb", PasswordHash: hash, IsAdmin: false,
-	})
+	_, err := s.db.Users.Create(t.Context(), "pleb", hash, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +237,7 @@ func TestNonAdmin_CannotAccessAdminEndpoints(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("login failed: %d %s", resp.StatusCode, body)
 	}
-	var l loginResp
+	var l authResp
 	_ = json.Unmarshal(body, &l)
 
 	resp, _ = doJSON(t, "GET", url+"/api/v1/admin/users", nil, l.Token)

@@ -1,13 +1,25 @@
+// Package storage — invites repo.
+//
+// Batch 3a additions:
+//   - MintWithOptions: takes expires_in and note (replaces / supplements Mint).
+//   - Extend: push an invite's expires_at forward.
+//   - Delete: remove an invite and (optionally) cascade to the user registered
+//     with it. cascade is opt-in because the DB-level cascade would be too
+//     aggressive for normal "revoke unused code" cleanups.
+
 package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base32"
 	"errors"
+	"strings"
 	"time"
 )
 
-// Invite represents a one-shot invitation code created by an admin.
+// Invite is the row shape for the invites table.
 type Invite struct {
 	Code      string
 	CreatedBy int64
@@ -27,103 +39,193 @@ func (i *Invite) IsExpired() bool { return time.Now().After(i.ExpiresAt) }
 // InviteRepo holds CRUD on the invites table.
 type InviteRepo struct{ db *sql.DB }
 
-// ErrInviteUsed signals an attempt to redeem an already-consumed code.
-var ErrInviteUsed = errors.New("storage: invite already used")
+func newInviteRepo(db *sql.DB) *InviteRepo { return &InviteRepo{db: db} }
 
-// ErrInviteExpired signals an attempt to redeem an expired code.
-var ErrInviteExpired = errors.New("storage: invite expired")
-
-// Insert creates a new invite. The code is provided by the caller (we do not
-// generate it here so the handler can show the human-readable code immediately).
-func (r *InviteRepo) Insert(ctx context.Context, in *Invite) error {
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO invites (code, created_by, expires_at, note)
-		VALUES (?, ?, ?, ?)
-	`, in.Code, in.CreatedBy, in.ExpiresAt, in.Note)
-	if isUniqueErr(err) {
-		// Caller should retry with a new code.
-		return errors.New("storage: invite code collision")
-	}
-	return err
-}
-
-// Get loads an invite by its code. Returns ErrNotFound if missing.
+// Get fetches an invite by code.
 func (r *InviteRepo) Get(ctx context.Context, code string) (*Invite, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT code, created_by, created_at, expires_at, used_by, used_at, note
-		FROM invites WHERE code = ?
-	`, code)
+	row := r.db.QueryRowContext(ctx, selectInviteSQL, code)
 	return scanInvite(row)
 }
 
-// Consume marks the invite as redeemed by userID. It is atomic: if the row is
-// already consumed (or doesn't exist), returns ErrInviteUsed/ErrNotFound.
-// It also enforces the expiry check.
-func (r *InviteRepo) Consume(ctx context.Context, code string, userID int64) error {
-	// We use an UPDATE ... WHERE used_by IS NULL to make this race-free.
-	res, err := r.db.ExecContext(ctx, `
-		UPDATE invites
-		   SET used_by = ?, used_at = CURRENT_TIMESTAMP
-		 WHERE code = ?
-		   AND used_by IS NULL
-		   AND expires_at > CURRENT_TIMESTAMP
-	`, userID, code)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 1 {
-		return nil
-	}
-	// Disambiguate the failure mode for a useful error message.
-	in, err := r.Get(ctx, code)
-	if err != nil {
-		return err // ErrNotFound surfaces here
-	}
-	if in.IsConsumed() {
-		return ErrInviteUsed
-	}
-	if in.IsExpired() {
-		return ErrInviteExpired
-	}
-	// Unreachable under correct schema.
-	return errors.New("storage: invite consume failed for unknown reason")
-}
-
-// List returns invites in reverse-chronological order. If onlyUnused is true,
-// already-consumed codes are filtered out.
-func (r *InviteRepo) List(ctx context.Context, onlyUnused bool) ([]*Invite, error) {
-	q := `SELECT code, created_by, created_at, expires_at, used_by, used_at, note
-	      FROM invites`
-	if onlyUnused {
-		q += ` WHERE used_by IS NULL`
-	}
-	q += ` ORDER BY created_at DESC`
-	rows, err := r.db.QueryContext(ctx, q)
+// List returns all invites in creation order (newest last; handlers sort for UI).
+func (r *InviteRepo) List(ctx context.Context) ([]*Invite, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT code, created_by, created_at, expires_at, used_by, used_at, COALESCE(note,'')
+		   FROM invites ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*Invite
 	for rows.Next() {
-		in, err := scanInvite(rows)
+		inv, err := scanInvite(rows)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, in)
+		out = append(out, inv)
 	}
 	return out, rows.Err()
 }
 
+// MintOptions configures a batch mint operation.
+type MintOptions struct {
+	// Count is the number of codes to generate (1..50).
+	Count int
+	// ExpiresIn is the TTL. If zero, defaults to 7 days (matches original Phase 1).
+	ExpiresIn time.Duration
+	// Note is a per-batch annotation. Optional.
+	Note string
+	// CreatedBy is the admin's user id. Required.
+	CreatedBy int64
+}
+
+// MintWithOptions generates Count invite codes in one transaction. Codes are
+// 8 ASCII chars, base32 no-padding, formatted as XXXX-XXXX for readability.
+func (r *InviteRepo) MintWithOptions(ctx context.Context, opts MintOptions) ([]*Invite, error) {
+	if opts.Count < 1 {
+		return nil, errors.New("count must be >=1")
+	}
+	if opts.Count > 50 {
+		return nil, errors.New("count must be <=50")
+	}
+	if opts.CreatedBy <= 0 {
+		return nil, errors.New("createdBy required")
+	}
+	if opts.ExpiresIn <= 0 {
+		opts.ExpiresIn = 7 * 24 * time.Hour
+	}
+	expiresAt := time.Now().Add(opts.ExpiresIn).UTC()
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var out []*Invite
+	for i := 0; i < opts.Count; i++ {
+		code, err := generateInviteCode()
+		if err != nil {
+			return nil, err
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO invites (code, created_by, expires_at, note)
+			VALUES (?, ?, ?, ?)
+		`, code, opts.CreatedBy, expiresAt, opts.Note)
+		if err != nil {
+			if isUniqueErr(err) {
+				// Rare: collision in 40-bit space. Retry by decrementing i.
+				i--
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, &Invite{
+			Code:      code,
+			CreatedBy: opts.CreatedBy,
+			CreatedAt: time.Now().UTC(),
+			ExpiresAt: expiresAt,
+			Note:      opts.Note,
+		})
+	}
+	return out, tx.Commit()
+}
+
+// Consume marks an invite as used by userID. Returns ErrInviteUnusable if the
+// invite is missing, already used, or expired.
+func (r *InviteRepo) Consume(ctx context.Context, code string, userID int64) error {
+	now := time.Now().UTC()
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE invites
+		   SET used_by = ?, used_at = ?
+		 WHERE code = ?
+		   AND used_by IS NULL
+		   AND expires_at > ?
+	`, userID, now, code, now)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrInviteUnusable
+	}
+	return nil
+}
+
+// Extend pushes an invite's expires_at forward by the given duration.
+// Returns ErrInviteUnusable if the invite is already used.
+func (r *InviteRepo) Extend(ctx context.Context, code string, by time.Duration) error {
+	if by <= 0 {
+		return errors.New("extension must be positive")
+	}
+	// Fetch first so we can compute based on the later of (now, existing exp).
+	inv, err := r.Get(ctx, code)
+	if err != nil {
+		return err
+	}
+	if inv.IsConsumed() {
+		return ErrInviteUnusable
+	}
+	base := inv.ExpiresAt
+	if time.Now().After(base) {
+		base = time.Now()
+	}
+	newExp := base.Add(by).UTC()
+	_, err = r.db.ExecContext(ctx,
+		`UPDATE invites SET expires_at = ? WHERE code = ?`, newExp, code)
+	return err
+}
+
+// Delete removes an invite. If cascade=true AND the invite has been used,
+// the associated user is also deleted (and by FK cascade, everything they
+// own — subscriptions, revoked_tokens, etc).
+//
+// Returns ErrNotFound if the code doesn't exist. Returns the deleted user id
+// (if any) so the caller can revoke tokens / audit log it.
+func (r *InviteRepo) Delete(ctx context.Context, code string, cascade bool) (deletedUserID *int64, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var usedBy sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT used_by FROM invites WHERE code = ?`, code).Scan(&usedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if cascade && usedBy.Valid {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, usedBy.Int64); err != nil {
+			return nil, err
+		}
+		uid := usedBy.Int64
+		deletedUserID = &uid
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM invites WHERE code = ?`, code); err != nil {
+		return nil, err
+	}
+	return deletedUserID, tx.Commit()
+}
+
+// ----- SQL & scanning ---------------------------------------------------------
+
+const selectInviteSQL = `
+	SELECT code, created_by, created_at, expires_at, used_by, used_at, COALESCE(note,'')
+	  FROM invites
+	 WHERE code = ?
+`
+
 func scanInvite(s scanner) (*Invite, error) {
-	var in Invite
+	var inv Invite
 	var usedBy sql.NullInt64
 	var usedAt sql.NullTime
-	var note sql.NullString
-	err := s.Scan(&in.Code, &in.CreatedBy, &in.CreatedAt, &in.ExpiresAt, &usedBy, &usedAt, &note)
+	err := s.Scan(&inv.Code, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt,
+		&usedBy, &usedAt, &inv.Note)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -131,15 +233,30 @@ func scanInvite(s scanner) (*Invite, error) {
 		return nil, err
 	}
 	if usedBy.Valid {
-		v := usedBy.Int64
-		in.UsedBy = &v
+		u := usedBy.Int64
+		inv.UsedBy = &u
 	}
 	if usedAt.Valid {
 		t := usedAt.Time
-		in.UsedAt = &t
+		inv.UsedAt = &t
 	}
-	if note.Valid {
-		in.Note = note.String
-	}
-	return &in, nil
+	return &inv, nil
 }
+
+// generateInviteCode returns an 8-char code formatted as XXXX-XXXX, using the
+// base32 alphabet minus ambiguous characters (I/L/O/0 collapsed).
+func generateInviteCode() (string, error) {
+	// 5 random bytes -> 8 base32 chars.
+	var raw [5]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	s := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw[:])
+	// Replace ambiguous chars with clearer ones.
+	s = strings.NewReplacer("0", "Z", "1", "Y", "O", "X", "I", "W", "L", "V").
+		Replace(s)
+	return s[:4] + "-" + s[4:8], nil
+}
+
+// ErrInviteUnusable indicates the invite is missing, already consumed, or expired.
+var ErrInviteUnusable = errors.New("invite is not usable")

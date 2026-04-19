@@ -100,7 +100,7 @@ func (s *Server) handleUILoginSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/login?error=token+issue+failed", http.StatusSeeOther)
 		return
 	}
-	_ = s.db.Users.TouchLastLogin(r.Context(), u.ID)
+	_ = s.db.Users.UpdateLastLogin(r.Context(), u.ID)
 	s.setAdminCookie(w, tok, claims.ExpiresAt.Time)
 	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 }
@@ -119,7 +119,7 @@ func (s *Server) handleUILogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUIDashboard(w http.ResponseWriter, r *http.Request) {
 	uCount, _ := s.db.Users.Count(r.Context())
-	invs, _ := s.db.Invites.List(r.Context(), true)
+	invs, _ := s.db.Invites.List(r.Context())
 	nodes, _ := s.db.Nodes.List(r.Context(), false)
 	s.renderTemplate(w, "dashboard.html", map[string]any{
 		"UserCount":     uCount,
@@ -131,7 +131,7 @@ func (s *Server) handleUIDashboard(w http.ResponseWriter, r *http.Request) {
 // --- /admin/invites -------------------------------------------------------
 
 func (s *Server) handleUIInvites(w http.ResponseWriter, r *http.Request) {
-	invs, err := s.db.Invites.List(r.Context(), false)
+	invs, err := s.db.Invites.List(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -154,14 +154,11 @@ func (s *Server) handleUICreateInvite(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	note := strings.TrimSpace(r.FormValue("note"))
 
-	code, err := newInviteCode()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	exp := time.Now().Add(7 * 24 * time.Hour)
-	err = s.db.Invites.Insert(r.Context(), &storage.Invite{
-		Code: code, CreatedBy: claims.UserID, ExpiresAt: exp, Note: note,
+	_, err = s.db.Invites.MintWithOptions(r.Context(), storage.MintOptions{
+		Count:     1,
+		ExpiresIn: 7 * 24 * time.Hour,
+		Note:      note,
+		CreatedBy: claims.UserID,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
