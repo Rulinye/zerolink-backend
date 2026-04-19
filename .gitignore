@@ -4,3 +4,8 @@ build/
 .DS_Store
 .idea/
 .vscode/
+
+# SQLite dev database
+dev/*.db
+dev/*.db-wal
+dev/*.db-shm

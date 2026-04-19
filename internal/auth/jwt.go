@@ -43,6 +43,10 @@ func NewSigner(secret []byte, ttl time.Duration, issuer string) (*Signer, error)
 	return &Signer{secret: secret, ttl: ttl, issuer: issuer}, nil
 }
 
+// TTL returns the configured token lifetime. Handlers need this to compute
+// expires_at when adding rows to the revoked_tokens table.
+func (s *Signer) TTL() time.Duration { return s.ttl }
+
 // Issue mints a token for the given user. Returns (token, claims) so callers
 // that need the jti for revocation can grab it.
 func (s *Signer) Issue(userID int64, username string, isAdmin bool) (string, *Claims, error) {

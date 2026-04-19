@@ -1,104 +1,190 @@
+// Package auth — JWT middleware.
+//
+// Batch 3a rewrites the middleware to do three extra checks beyond signature
+// verification (was Phase 1's baseline):
+//
+//   1. Fetch the user fresh from DB and bail if IsEffectivelyDisabled(now).
+//      This makes admin "disable" take effect on the next API call
+//      (typically within 30s heartbeat) without any token revocation dance.
+//
+//   2. Compare the JWT's `iat` claim against users.password_changed_at. Any
+//      token issued before that timestamp is considered implicitly revoked.
+//      This mechanism covers:
+//        - login (F15 "kick previous sessions"): login bumps password_changed_at
+//        - change-password (F17)
+//        - admin "disable" (via RevokeAllForUser in the disable handler)
+//
+//   3. Check the jti against the revoked_tokens table (legacy explicit revoke,
+//      e.g. for /auth/logout on a single device).
+//
+// On any failure we return 401 with a hint; the client treats this as a hard
+// kickout (D2.24).
+
 package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rulinye/zerolink-backend/internal/storage"
 )
 
 type contextKey string
 
-const claimsKey contextKey = "auth.claims"
+const claimsCtxKey contextKey = "zl-auth-claims"
 
-// FromContext returns the Claims set by Middleware. Returns nil if the request
-// did not pass through the middleware (i.e., on an unauthenticated route).
-func FromContext(ctx context.Context) *Claims {
-	c, _ := ctx.Value(claimsKey).(*Claims)
-	return c
+// Context payload available to downstream handlers via auth.FromContext.
+type Context struct {
+	UserID   int64
+	Username string
+	IsAdmin  bool
+	JTI      string
+	IssuedAt time.Time
 }
 
-// Middleware verifies the Authorization: Bearer <jwt> header, checks the token
-// against the revocation list, loads the user, and rejects if the user is
-// disabled. On success it injects the Claims into the request context.
-//
-// The user repo is passed in (rather than the whole storage.DB) so test code
-// can plug in a fake.
-func Middleware(s *Signer, users *storage.UserRepo, revoked *storage.RevokedTokenRepo) func(http.Handler) http.Handler {
+// FromContext returns the auth context populated by Middleware.
+// Panics if the route wasn't wrapped by Middleware — that's a bug, not a
+// runtime-handleable error.
+func FromContext(ctx context.Context) *Context {
+	v, ok := ctx.Value(claimsCtxKey).(*Context)
+	if !ok {
+		panic("auth.FromContext called outside authenticated route")
+	}
+	return v
+}
+
+// Middleware returns an http middleware that enforces a valid, non-revoked,
+// non-disabled user on the request.
+func Middleware(signer *Signer, users *storage.UserRepo, tokens *storage.RevokedTokenRepo) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tok := bearerToken(r)
-			if tok == "" {
-				writeErr(w, http.StatusUnauthorized, "missing bearer token")
+			tok, ok := bearerToken(r)
+			if !ok {
+				writeAuthError(w, http.StatusUnauthorized, "missing bearer token")
 				return
 			}
-			claims, err := s.Parse(tok)
+			claims, err := signer.Parse(tok)
 			if err != nil {
-				writeErr(w, http.StatusUnauthorized, "invalid token: "+err.Error())
+				writeAuthError(w, http.StatusUnauthorized, "invalid token: "+err.Error())
 				return
 			}
 
-			isRev, err := revoked.IsRevoked(r.Context(), claims.ID)
+			ctx := r.Context()
+
+			// Check 1: revocation list.
+			revoked, err := tokens.IsRevoked(ctx, claims.ID)
 			if err != nil {
-				writeErr(w, http.StatusInternalServerError, "revocation check failed")
+				writeAuthError(w, http.StatusInternalServerError, "revocation check failed")
 				return
 			}
-			if isRev {
-				writeErr(w, http.StatusUnauthorized, "token revoked")
+			if revoked {
+				writeAuthError(w, http.StatusUnauthorized, "token revoked")
 				return
 			}
 
-			u, err := users.GetByID(r.Context(), claims.UserID)
+			// Check 2 + 3: user state.
+			user, err := users.GetByID(ctx, claims.UserID)
 			if err != nil {
 				if errors.Is(err, storage.ErrNotFound) {
-					writeErr(w, http.StatusUnauthorized, "user no longer exists")
+					// User was deleted — treat any outstanding token as invalid.
+					writeAuthError(w, http.StatusUnauthorized, "user no longer exists")
 					return
 				}
-				writeErr(w, http.StatusInternalServerError, "user lookup failed")
+				writeAuthError(w, http.StatusInternalServerError, "user lookup failed")
 				return
 			}
-			if u.IsDisabled {
-				writeErr(w, http.StatusForbidden, "account disabled")
+			if user.IsEffectivelyDisabled(time.Now()) {
+				writeAuthError(w, http.StatusForbidden, "account disabled")
 				return
+			}
+			if user.PasswordChangedAt != nil && claims.IssuedAt != nil {
+				iat := claims.IssuedAt.Time
+				// Tokens issued strictly before the last password_changed bump
+				// are stale (covers login, change-pw, admin-disable flows).
+				// Use 1-second tolerance — SQLite CURRENT_TIMESTAMP is second
+				// precision, JWT iat is also seconds; allow equal.
+				if iat.Before(user.PasswordChangedAt.Add(-1 * time.Second)) {
+					writeAuthError(w, http.StatusUnauthorized, "token superseded")
+					return
+				}
 			}
 
-			ctx := context.WithValue(r.Context(), claimsKey, claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			// All good — attach context and continue.
+			authCtx := &Context{
+				UserID:   claims.UserID,
+				Username: claims.Username,
+				IsAdmin:  claims.IsAdmin,
+				JTI:      claims.ID,
+			}
+			if claims.IssuedAt != nil {
+				authCtx.IssuedAt = claims.IssuedAt.Time
+			}
+			r2 := r.WithContext(context.WithValue(ctx, claimsCtxKey, authCtx))
+			next.ServeHTTP(w, r2)
 		})
 	}
 }
 
-// AdminOnly is a downstream middleware that 403s requests whose claims do not
-// have the admin bit. Must be used AFTER Middleware.
+// AdminOnly must come AFTER Middleware. Returns 403 if the authed user is
+// not an admin.
 func AdminOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := FromContext(r.Context())
-		if c == nil {
-			writeErr(w, http.StatusUnauthorized, "no auth context")
-			return
-		}
 		if !c.IsAdmin {
-			writeErr(w, http.StatusForbidden, "admin only")
+			writeAuthError(w, http.StatusForbidden, "admin privileges required")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func bearerToken(r *http.Request) string {
+// bearerToken extracts the token from "Authorization: Bearer <token>".
+func bearerToken(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
-	const p = "Bearer "
-	if !strings.HasPrefix(h, p) {
-		return ""
+	if h == "" {
+		return "", false
 	}
-	return strings.TrimSpace(h[len(p):])
+	const prefix = "Bearer "
+	if !strings.HasPrefix(h, prefix) {
+		return "", false
+	}
+	tok := strings.TrimSpace(h[len(prefix):])
+	return tok, tok != ""
 }
 
-func writeErr(w http.ResponseWriter, code int, msg string) {
+// writeAuthError emits a JSON {"error": msg} response.
+func writeAuthError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(`{"error":` + jsonQuote(msg) + `}`))
+}
+
+// jsonQuote quotes a string as a JSON literal. Avoids pulling in encoding/json
+// for this hot path.
+func jsonQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"', '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r < 0x20 {
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }

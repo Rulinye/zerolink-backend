@@ -1,160 +1,141 @@
-// Command admin-create creates an admin user, prompting for the password on
-// stdin. Idempotent for existing usernames only when -force is passed; the
-// default refuses rather than silently rotate the password.
+// Package main — admin-create CLI.
 //
 // Usage:
 //
-//	zerolink-backend-admin-create -db /var/lib/zerolink-backend/zerolink.db -u rulinye
-//	# password prompt follows
+//   # Create a new admin user:
+//   zerolink-backend-admin-create -u alice
+//       (prompts for password twice)
 //
-// Designed for the operator to run directly over SSH:
+//   # Reset password for an EXISTING user (admin or not) — F16:
+//   zerolink-backend-admin-create -u rulinye --reset-password
+//       (prompts for new password twice)
 //
-//	ssh ubuntu@chuncheon
-//	sudo -u zerolink /usr/local/bin/zerolink-backend-admin-create -u rulinye
+// With --reset-password, the user must already exist. Otherwise the CLI errors
+// out instead of silently creating a new user (which would be confusing if
+// the admin just mistyped the username).
+
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"runtime/debug"
-	"strings"
-	"syscall"
-
-	"github.com/rulinye/zerolink-backend/internal/auth"
-	"github.com/rulinye/zerolink-backend/internal/storage"
 
 	"golang.org/x/term"
-)
 
-// Version is injected at link time via -ldflags="-X main.Version=v1.2.3".
-// Matches the main server binary so the Ansible role can reliably detect
-// which release is installed across all three binaries.
-var Version = ""
+	"github.com/rulinye/zerolink-backend/internal/auth"
+	"github.com/rulinye/zerolink-backend/internal/config"
+	"github.com/rulinye/zerolink-backend/internal/storage"
+)
 
 func main() {
 	var (
-		dbPath      = flag.String("db", "/var/lib/zerolink-backend/zerolink.db", "SQLite path")
-		user        = flag.String("u", "", "username to create or update")
-		force       = flag.Bool("force", false, "if user exists, reset password instead of failing")
-		showVersion = flag.Bool("version", false, "print version and exit")
+		username      = flag.String("u", "", "username to create or reset")
+		resetPassword = flag.Bool("reset-password", false, "reset password for existing user (no new user created)")
+		makeAdmin     = flag.Bool("admin", true, "grant admin to newly-created user (ignored with --reset-password)")
 	)
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Println(versionString())
-		return
-	}
-
-	if *user == "" {
-		fmt.Fprintln(os.Stderr, "-u username is required")
+	if *username == "" {
+		fmt.Fprintln(os.Stderr, "usage: zerolink-backend-admin-create -u <username> [--reset-password] [--admin=false]")
 		os.Exit(2)
 	}
 
-	pw, err := readPassword()
+	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "read password:", err)
-		os.Exit(1)
-	}
-	if len(pw) < 8 {
-		fmt.Fprintln(os.Stderr, "password must be >=8 chars")
-		os.Exit(1)
+		fatal("config: %v", err)
 	}
 
-	hash, err := auth.HashPassword(pw)
+	db, err := storage.Open(cfg.DBPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hash:", err)
-		os.Exit(1)
-	}
-
-	db, err := storage.Open(*dbPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "open db:", err)
-		os.Exit(1)
+		fatal("open db: %v", err)
 	}
 	defer db.Close()
 
 	ctx := context.Background()
-	existing, err := db.Users.GetByUsername(ctx, *user)
-	switch {
-	case errors.Is(err, storage.ErrNotFound):
-		uid, err := db.Users.Insert(ctx, &storage.User{
-			Username:     *user,
-			PasswordHash: hash,
-			IsAdmin:      true,
-		})
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "insert:", err)
-			os.Exit(1)
-		}
-		fmt.Printf("created admin user %q (id=%d)\n", *user, uid)
-	case err != nil:
-		fmt.Fprintln(os.Stderr, "lookup:", err)
-		os.Exit(1)
-	default:
-		if !*force {
-			fmt.Fprintf(os.Stderr,
-				"user %q already exists (id=%d). Re-run with -force to reset password.\n",
-				existing.Username, existing.ID)
-			os.Exit(1)
-		}
-		if _, err := db.Conn().ExecContext(ctx,
-			`UPDATE users SET password_hash = ?, is_admin = 1, is_disabled = 0 WHERE id = ?`,
-			hash, existing.ID); err != nil {
-			fmt.Fprintln(os.Stderr, "update:", err)
-			os.Exit(1)
-		}
-		fmt.Printf("updated admin user %q (id=%d), password reset\n",
-			existing.Username, existing.ID)
+
+	if *resetPassword {
+		resetPasswordFlow(ctx, db, *username)
+		return
 	}
+	createUserFlow(ctx, db, *username, *makeAdmin)
 }
 
-func readPassword() (string, error) {
-	if term.IsTerminal(int(syscall.Stdin)) {
-		fmt.Fprint(os.Stderr, "password: ")
-		p1, err := term.ReadPassword(int(syscall.Stdin))
-		fmt.Fprintln(os.Stderr)
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprint(os.Stderr, "confirm:  ")
-		p2, err := term.ReadPassword(int(syscall.Stdin))
-		fmt.Fprintln(os.Stderr)
-		if err != nil {
-			return "", err
-		}
-		if string(p1) != string(p2) {
-			return "", errors.New("passwords don't match")
-		}
-		return string(p1), nil
+func createUserFlow(ctx context.Context, db *storage.DB, username string, admin bool) {
+	// Reject if already exists.
+	if _, err := db.Users.GetByUsername(ctx, username); err == nil {
+		fatal("user %q already exists (use --reset-password to change its password)", username)
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		fatal("lookup: %v", err)
 	}
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		return "", errors.New("no input")
+
+	pw := promptNewPassword()
+	hash, err := auth.HashPassword(pw)
+	if err != nil {
+		fatal("hash: %v", err)
 	}
-	return strings.TrimRight(scanner.Text(), "\r\n"), nil
+	u, err := db.Users.Create(ctx, username, hash, admin)
+	if err != nil {
+		fatal("create: %v", err)
+	}
+	fmt.Printf("created user %q (id=%d, admin=%v)\n", u.Username, u.ID, u.IsAdmin)
 }
 
-// versionString mirrors the server binary: -ldflags wins, else VCS info, else "dev".
-func versionString() string {
-	if Version != "" {
-		return Version
-	}
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "dev"
-	}
-	for _, s := range info.Settings {
-		if s.Key == "vcs.revision" && s.Value != "" {
-			rev := s.Value
-			if len(rev) > 12 {
-				rev = rev[:12]
-			}
-			return "dev-" + rev
+func resetPasswordFlow(ctx context.Context, db *storage.DB, username string) {
+	u, err := db.Users.GetByUsername(ctx, username)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			fatal("user %q does not exist", username)
 		}
+		fatal("lookup: %v", err)
 	}
-	return "dev"
+
+	pw := promptNewPassword()
+	hash, err := auth.HashPassword(pw)
+	if err != nil {
+		fatal("hash: %v", err)
+	}
+	if err := db.Users.SetPassword(ctx, u.ID, hash); err != nil {
+		fatal("update: %v", err)
+	}
+	// SetPassword bumps password_changed_at, which invalidates all existing
+	// JWTs for this user. Target user will see a hard-kickout modal on their
+	// next heartbeat (D2.24).
+	fmt.Printf("password reset for %q (id=%d); all existing sessions invalidated\n",
+		u.Username, u.ID)
+}
+
+// promptNewPassword asks for the password twice and returns it plaintext.
+// Terminal echo is disabled while typing.
+func promptNewPassword() string {
+	fmt.Fprint(os.Stderr, "new password: ")
+	pw1, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		fatal("read password: %v", err)
+	}
+	if len(pw1) < 8 {
+		fatal("password too short (need >=8 chars)")
+	}
+	if len(pw1) > 72 {
+		fatal("password too long (bcrypt limit 72 bytes)")
+	}
+
+	fmt.Fprint(os.Stderr, "confirm password: ")
+	pw2, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		fatal("read password: %v", err)
+	}
+	if string(pw1) != string(pw2) {
+		fatal("passwords do not match")
+	}
+	return string(pw1)
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "admin-create: "+format+"\n", args...)
+	os.Exit(1)
 }
