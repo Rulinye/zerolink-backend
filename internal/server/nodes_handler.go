@@ -46,6 +46,11 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- GET /api/v1/nodes/{id}/config ----------------------------------------
+//
+// Group 9a (Round 4): the response now includes an `outbound_config`
+// field — protocol-agnostic overrides the client honors. Today it
+// passes through `packet_encoding` (xudp / packet_up / packetaddr).
+// See client-side vswitch/config.rs for the consumer side.
 
 func (s *Server) handleNodeConfig(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -73,14 +78,30 @@ func (s *Server) handleNodeConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "config_json malformed")
 		return
 	}
+
+	// Parse outbound_config (TEXT column, JSON shape). Default to {}
+	// if malformed — this is opaque passthrough; we don't want a bad
+	// override to break the connect flow. Log and continue.
+	var outbound map[string]any
+	if n.OutboundConfig != "" {
+		if err := json.Unmarshal([]byte(n.OutboundConfig), &outbound); err != nil {
+			// Don't fail the request — empty object is a safe degrade
+			// to "use protocol defaults".
+			outbound = map[string]any{}
+		}
+	} else {
+		outbound = map[string]any{}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":       n.ID,
-		"name":     n.Name,
-		"region":   n.Region,
-		"address":  n.Address,
-		"port":     n.Port,
-		"protocol": n.Protocol,
-		"params":   cfg,
+		"id":              n.ID,
+		"name":            n.Name,
+		"region":          n.Region,
+		"address":         n.Address,
+		"port":            n.Port,
+		"protocol":        n.Protocol,
+		"params":          cfg,
+		"outbound_config": outbound,
 	})
 }
 

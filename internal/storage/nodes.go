@@ -10,17 +10,25 @@ import (
 // Node is a server entry the client can connect to. The bulk of the
 // protocol-specific configuration lives in ConfigJSON; that field is opaque
 // to the backend and forwarded as-is to the client (or rendered into Clash YAML).
+//
+// OutboundConfig (added in migration 0003 / Group 9a) is a separate
+// opaque-JSON slot, also TEXT, also forwarded as-is. Keeping it
+// separate from ConfigJSON lets the client distinguish "protocol
+// parameters" (ConfigJSON / params) from "outbound tuning"
+// (OutboundConfig / outbound_config). Defaults to "{}" so reads always
+// produce well-formed JSON.
 type Node struct {
-	ID         int64
-	Name       string
-	Region     string
-	Address    string
-	Port       int
-	Protocol   string
-	ConfigJSON string
-	IsEnabled  bool
-	SortOrder  int
-	UpdatedAt  time.Time
+	ID             int64
+	Name           string
+	Region         string
+	Address        string
+	Port           int
+	Protocol       string
+	ConfigJSON     string
+	OutboundConfig string
+	IsEnabled      bool
+	SortOrder      int
+	UpdatedAt      time.Time
 }
 
 // NodeRepo holds CRUD on the nodes table.
@@ -29,20 +37,29 @@ type NodeRepo struct{ db *sql.DB }
 // Upsert inserts a node or, if a row with the same Name exists, updates the
 // mutable fields. This is the operation used by the import-nodes CLI when
 // Ansible re-syncs inventory; the Name acts as the natural key.
+//
+// Group 9a: Upsert now also sets/updates outbound_config. Callers that
+// don't have a value should set n.OutboundConfig = "{}" (the column's
+// own default applies on INSERT but not on UPDATE through this path).
 func (r *NodeRepo) Upsert(ctx context.Context, n *Node) error {
+	oc := n.OutboundConfig
+	if oc == "" {
+		oc = "{}"
+	}
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO nodes (name, region, address, port, protocol, config_json, is_enabled, sort_order, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO nodes (name, region, address, port, protocol, config_json, outbound_config, is_enabled, sort_order, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(name) DO UPDATE SET
-			region      = excluded.region,
-			address     = excluded.address,
-			port        = excluded.port,
-			protocol    = excluded.protocol,
-			config_json = excluded.config_json,
-			is_enabled  = excluded.is_enabled,
-			sort_order  = excluded.sort_order,
-			updated_at  = CURRENT_TIMESTAMP
-	`, n.Name, n.Region, n.Address, n.Port, n.Protocol, n.ConfigJSON,
+			region          = excluded.region,
+			address         = excluded.address,
+			port            = excluded.port,
+			protocol        = excluded.protocol,
+			config_json     = excluded.config_json,
+			outbound_config = excluded.outbound_config,
+			is_enabled      = excluded.is_enabled,
+			sort_order      = excluded.sort_order,
+			updated_at      = CURRENT_TIMESTAMP
+	`, n.Name, n.Region, n.Address, n.Port, n.Protocol, n.ConfigJSON, oc,
 		boolToInt(n.IsEnabled), n.SortOrder)
 	return err
 }
@@ -74,7 +91,7 @@ func (r *NodeRepo) DeleteMissing(ctx context.Context, keepNames []string) (int64
 func (r *NodeRepo) Get(ctx context.Context, id int64) (*Node, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, name, region, address, port, protocol, config_json,
-		       is_enabled, sort_order, updated_at
+		       outbound_config, is_enabled, sort_order, updated_at
 		FROM nodes WHERE id = ?
 	`, id)
 	return scanNode(row)
@@ -86,7 +103,7 @@ func (r *NodeRepo) Get(ctx context.Context, id int64) (*Node, error) {
 func (r *NodeRepo) GetByName(ctx context.Context, name string) (*Node, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, name, region, address, port, protocol, config_json,
-		       is_enabled, sort_order, updated_at
+		       outbound_config, is_enabled, sort_order, updated_at
 		FROM nodes WHERE name = ?
 	`, name)
 	return scanNode(row)
@@ -96,7 +113,7 @@ func (r *NodeRepo) GetByName(ctx context.Context, name string) (*Node, error) {
 // disabled nodes are filtered out (this is what end users see).
 func (r *NodeRepo) List(ctx context.Context, onlyEnabled bool) ([]*Node, error) {
 	q := `SELECT id, name, region, address, port, protocol, config_json,
-	             is_enabled, sort_order, updated_at FROM nodes`
+	             outbound_config, is_enabled, sort_order, updated_at FROM nodes`
 	if onlyEnabled {
 		q += ` WHERE is_enabled = 1`
 	}
@@ -121,7 +138,7 @@ func scanNode(s scanner) (*Node, error) {
 	var n Node
 	var enabled int
 	err := s.Scan(&n.ID, &n.Name, &n.Region, &n.Address, &n.Port, &n.Protocol,
-		&n.ConfigJSON, &enabled, &n.SortOrder, &n.UpdatedAt)
+		&n.ConfigJSON, &n.OutboundConfig, &enabled, &n.SortOrder, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -129,6 +146,11 @@ func scanNode(s scanner) (*Node, error) {
 		return nil, err
 	}
 	n.IsEnabled = enabled != 0
+	// Defensive: NOT NULL DEFAULT '{}' means this should never be empty,
+	// but a manual SQL UPDATE could clear it. Keep response well-formed.
+	if n.OutboundConfig == "" {
+		n.OutboundConfig = "{}"
+	}
 	return &n, nil
 }
 
