@@ -3,6 +3,11 @@
 // Phase 1 baseline lived inline in server.go; Batch 3a factors it out and
 // adds: change-password, usage, admin quota / password / delete user /
 // delete invite / extend invite.
+//
+// Batch 3.3 Group 1c: adds /auth/verify for broker reverse-validation
+// of client JWTs. This route uses serviceTokenMiddleware (Bearer service
+// token) and is intentionally NOT under the JWT auth group — it
+// authenticates a service, not a user.
 
 package server
 
@@ -35,6 +40,14 @@ func (s *Server) buildRouter() chi.Router {
 		// Open.
 		r.Post("/auth/register", s.handleRegister)
 		r.Post("/auth/login", s.handleLogin)
+
+		// Service-authenticated (broker -> backend reverse-verify).
+		// Uses Bearer service_token, NOT user JWT. See
+		// service_token_middleware.go for the lookup details.
+		r.Group(func(r chi.Router) {
+			r.Use(s.serviceTokenMiddleware)
+			r.Post("/auth/verify", s.handleVerifyJWT)
+		})
 
 		// Authenticated (user).
 		r.Group(func(r chi.Router) {
