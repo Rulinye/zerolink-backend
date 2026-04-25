@@ -1,17 +1,13 @@
 #![allow(dead_code)] // TODO 2c: remove when fields/methods are wired into RPC handlers
 //! zerolink-broker — room signaling + L3 datapath relay daemon.
 //!
-//! 2a scope: bootstrap, env config, fingerprint-pinned reverse-verify
-//! client, and an HTTP listener with `/ping` + `/version`. No room
-//! model, no WebSocket signaling, no QUIC datapath — those land in
-//! 2b/2c/2d respectively.
-//!
-//! Run with all required env vars set (see config.rs). systemd
-//! EnvironmentFile is the production mechanism; for local development
-//! use a `.env` file or inline `ENV=val cargo run`.
+//! 2b scope: bootstrap now opens a SQLite pool and runs migrations.
+//! Storage handles are wired into AppState but not yet consumed by any
+//! handler — that lands in 2c.
 
 mod config;
 mod http;
+mod storage;
 mod verify_client;
 
 use anyhow::Context;
@@ -21,15 +17,13 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::http::AppState;
+use crate::storage::Storage;
 use crate::verify_client::VerifyClient;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // rustls 0.23 requires a crypto provider to be installed for the
-    // process. We use ring (matches the feature flag in Cargo.toml).
-    // This must happen BEFORE any rustls ClientConfig builder is called.
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("install rustls crypto provider"))?;
@@ -46,8 +40,14 @@ async fn main() -> anyhow::Result<()> {
         backend_url = %cfg.backend_url,
         short_id = %cfg.short_id,
         verify_cache_ttl_s = cfg.verify_cache_ttl.as_secs(),
+        db_path = %cfg.db_path,
         "starting zerolink-broker"
     );
+
+    // Storage open + migrations applied at boot. Failure at this stage
+    // is fatal — there's no point starting an HTTP listener if we can't
+    // persist room state.
+    let storage = Storage::open(&cfg.db_path).await.context("open storage")?;
 
     let verify = Arc::new(
         VerifyClient::new(
@@ -63,26 +63,23 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         config: Arc::new(cfg.clone()),
         verify: verify.clone(),
+        storage: storage.clone(),
         version: VERSION,
     };
 
     let router = http::router(state);
 
     let http_listen = cfg.listen_http.clone();
-
-    // Spawn the signaling listener.
     let http_task = tokio::spawn(async move {
         if let Err(e) = http::serve(&http_listen, router).await {
             error!(target: "http", "signaling server exited: {e:#}");
         }
     });
 
-    // Wait for SIGINT/SIGTERM. SIGTERM is what systemd sends on stop.
     shutdown_signal().await;
     info!(target: "boot", "shutdown signal received; stopping");
 
     http_task.abort();
-    // Best-effort: give the listener a moment to finish in-flight reqs.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), http_task).await;
 
     info!(target: "boot", "stopped");
@@ -92,8 +89,6 @@ async fn main() -> anyhow::Result<()> {
 fn init_logging(json: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
 
-    // RUST_LOG override stays active in dev; default to info,broker=debug
-    // so per-module debug lines (verify cache, etc.) show up.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,zerolink_broker=debug"));
 

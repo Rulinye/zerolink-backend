@@ -1,11 +1,7 @@
 //! HTTP signaling server (axum).
 //!
-//! 2a scope: skeleton router with `/ping` and `/version` only. WebSocket
-//! signaling RPC + push events arrive in 2c. The room model + storage
-//! arrive in 2b.
-//!
-//! The signaling listener and the QUIC datapath listener (2d) run as
-//! independent Tokio tasks; nothing here cares about QUIC.
+//! 2b scope: AppState gains a Storage handle. Endpoints unchanged
+//! (`/ping`, `/version`); 2c lands the WebSocket signaling RPC.
 
 use axum::{routing::get, Json, Router};
 use serde::Serialize;
@@ -13,12 +9,14 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::config::Config;
+use crate::storage::Storage;
 use crate::verify_client::VerifyClient;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub verify: Arc<VerifyClient>,
+    pub storage: Storage,
     pub version: &'static str,
 }
 
