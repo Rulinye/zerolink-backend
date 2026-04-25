@@ -263,6 +263,41 @@ impl RoomRepo {
             .collect())
     }
 
+    /// List ALL alive rooms (active or empty_grace) across the broker.
+    /// For the admin view: `admin_list_all_rooms` RPC. Ordered by
+    /// last_active_at DESC so freshly-active rooms surface first.
+    pub async fn list_all_alive(&self) -> Result<Vec<Room>, sqlx::Error> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id AS "id!", code, owner_user_id, owner_username,
+                   created_at, last_active_at,
+                   path_strategy, supports_p2p,
+                   state, grace_until, destroyed_at
+              FROM rooms
+             WHERE state != 'destroyed'
+             ORDER BY last_active_at DESC
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Room {
+                id: r.id,
+                code: r.code,
+                owner_user_id: r.owner_user_id,
+                owner_username: r.owner_username,
+                created_at: r.created_at,
+                last_active_at: r.last_active_at,
+                path_strategy: r.path_strategy,
+                supports_p2p: r.supports_p2p != 0,
+                state: RoomState::from_db(&r.state).unwrap_or(RoomState::Active),
+                grace_until: r.grace_until,
+                destroyed_at: r.destroyed_at,
+            })
+            .collect())
+    }
+
     /// Bump `last_active_at` to `now`. Called on every join/leave/
     /// heartbeat by the WS layer.
     pub async fn touch_activity(&self, room_id: i64, now: i64) -> Result<(), sqlx::Error> {

@@ -20,7 +20,8 @@ use tracing::{debug, info, warn};
 use crate::http::AppState;
 use crate::storage::rooms::{RoomError, RoomState};
 use crate::ws::protocol::{
-    CreateRoomParams, CreateRoomResult, JoinRoomParams, JoinRoomResult, ListMyRoomsResult,
+    AdminDestroyRoomParams, AdminListAllRoomsResult, AdminRoomEntry, CreateRoomParams,
+    CreateRoomResult, DestroyRoomParams, JoinRoomParams, JoinRoomResult, ListMyRoomsResult,
     MemberInfo, MemberJoinedEvent, MemberLeftEvent, MyRoomEntry, OkResult, ResumeSessionParams,
     ResumeSessionResult, RoomDestroyedEvent, RoomEvent, RpcError,
 };
@@ -450,10 +451,26 @@ pub async fn handle_leave_room(
 pub async fn handle_destroy_room(
     state: &AppState,
     auth: &WsAuth,
+    params: Json,
     in_room: Option<(i64, String)>,
 ) -> HandlerOutput {
-    let Some((room_id, session_id)) = in_room else {
-        return err("not_in_room", "you are not in any room");
+    let p: DestroyRoomParams = serde_json::from_value(params).unwrap_or_default();
+
+    // Resolve room_id + session_id from either the in-room state
+    // (when the caller is still bound to a session) or from
+    // params.room_id (owner closing an empty_grace room from the
+    // search-rooms UI). The caller MUST have owner rights — admin
+    // override goes through handle_admin_destroy_room.
+    let was_in_room = in_room.is_some();
+    let (room_id, session_id_for_cleanup) = match (in_room, p.room_id) {
+        (Some((rid, sid)), _) => (rid, Some(sid)),
+        (None, Some(rid)) => (rid, None),
+        (None, None) => {
+            return err(
+                "bad_params",
+                "destroy_room requires room_id when not currently in a room",
+            );
+        }
     };
 
     let room_repo = crate::storage::rooms::RoomRepo::new(state.storage.pool.clone());
@@ -470,6 +487,9 @@ pub async fn handle_destroy_room(
             "permission_denied",
             "only the room owner can destroy this room",
         );
+    }
+    if matches!(room.state, crate::storage::rooms::RoomState::Destroyed) {
+        return err("not_found", "room already destroyed");
     }
 
     let now = Utc::now().timestamp();
@@ -492,7 +512,18 @@ pub async fn handle_destroy_room(
         .await;
 
     state.broadcast.drop_room(room_id).await;
-    state.sessions.remove(&session_id).await;
+    if let Some(sid) = session_id_for_cleanup {
+        // This WS was bound to the room — cleanup the session it knew.
+        state.sessions.remove(&sid).await;
+    } else if let Some(other_sess) = state.sessions.find_by_user(auth.user_id).await {
+        // Owner closed the room remotely (params.room_id path) while
+        // still holding a grace session bound to this room from a
+        // prior ws. Clear it so the user can immediately create a
+        // new room without waiting 30s for the watchdog.
+        if other_sess.room_id == room_id {
+            state.sessions.remove(&other_sess.session_id).await;
+        }
+    }
 
     info!(
         target: "rpc",
@@ -501,9 +532,19 @@ pub async fn handle_destroy_room(
         "owner destroyed room"
     );
 
+    // ExitRoom only when the WS was actually bound to the room being
+    // destroyed. When the owner is closing an empty_grace room from
+    // the search-rooms UI (no session), the WS stays in idle state
+    // and can issue further RPCs (e.g. create a new room).
+    let side_effect = if was_in_room {
+        SideEffect::ExitRoom
+    } else {
+        SideEffect::None
+    };
+
     HandlerOutput {
         result: Ok(serde_json::to_value(OkResult { ok: true }).unwrap()),
-        side_effect: SideEffect::ExitRoom,
+        side_effect,
     }
 }
 
@@ -638,6 +679,128 @@ pub async fn handle_resume_session(
             binding,
             rx,
         },
+    }
+}
+
+// =====================================================================
+// admin_list_all_rooms (admin only)
+// =====================================================================
+
+pub async fn handle_admin_list_all_rooms(state: &AppState, auth: &WsAuth) -> HandlerOutput {
+    if !auth.is_admin {
+        return err("permission_denied", "admin privileges required");
+    }
+    let room_repo = crate::storage::rooms::RoomRepo::new(state.storage.pool.clone());
+    let member_repo = crate::storage::members::MemberRepo::new(state.storage.pool.clone());
+
+    let rooms = match room_repo.list_all_alive().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(target: "rpc", err = %e, "admin: list_all_alive failed");
+            return err("internal", "admin_list_all_rooms failed");
+        }
+    };
+
+    let mut entries = Vec::with_capacity(rooms.len());
+    for r in rooms {
+        let count = member_repo.count_in_room(r.id).await.unwrap_or(0);
+        entries.push(AdminRoomEntry {
+            room_id: r.id,
+            code: r.code.clone(),
+            code_display: format!("{}-{}", state.config.short_id, r.code),
+            owner_user_id: r.owner_user_id,
+            owner_username: r.owner_username,
+            state: r.state.as_str().to_string(),
+            created_at: r.created_at,
+            last_active_at: r.last_active_at,
+            grace_until: r.grace_until,
+            member_count: count,
+        });
+    }
+
+    info!(
+        target: "rpc",
+        admin_user_id = auth.user_id,
+        room_count = entries.len(),
+        "admin listed all rooms"
+    );
+
+    HandlerOutput {
+        result: Ok(serde_json::to_value(AdminListAllRoomsResult { rooms: entries }).unwrap()),
+        side_effect: SideEffect::None,
+    }
+}
+
+// =====================================================================
+// admin_destroy_room (admin only) — force destroy any room
+// =====================================================================
+
+pub async fn handle_admin_destroy_room(
+    state: &AppState,
+    auth: &WsAuth,
+    params: Json,
+) -> HandlerOutput {
+    if !auth.is_admin {
+        return err("permission_denied", "admin privileges required");
+    }
+    let p: AdminDestroyRoomParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return err("bad_params", format!("admin_destroy_room params: {e}")),
+    };
+
+    let room_repo = crate::storage::rooms::RoomRepo::new(state.storage.pool.clone());
+    let room = match room_repo.get_by_id(p.room_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return err("not_found", "room not found"),
+        Err(e) => {
+            warn!(target: "rpc", err = %e, "admin_destroy_room lookup failed");
+            return err("internal", "admin_destroy_room failed");
+        }
+    };
+    if matches!(room.state, crate::storage::rooms::RoomState::Destroyed) {
+        return err("not_found", "room already destroyed");
+    }
+
+    let now = Utc::now().timestamp();
+    if let Err(e) = room_repo.destroy(p.room_id, now).await {
+        warn!(target: "rpc", err = %e, "admin destroy failed");
+        return err("internal", "admin_destroy_room failed");
+    }
+
+    let _ = state
+        .broadcast
+        .send(
+            p.room_id,
+            RoomEvent::RoomDestroyed(RoomDestroyedEvent {
+                room_id: p.room_id,
+                reason: "admin_destroy".to_string(),
+            }),
+        )
+        .await;
+    state.broadcast.drop_room(p.room_id).await;
+
+    // The owner of the destroyed room may currently have an active
+    // session bound to it — find it via the by_user index and remove
+    // so they can immediately create a new room without bumping into
+    // the partial-unique constraint.
+    if let Some(sess) = state.sessions.find_by_user(room.owner_user_id).await {
+        if sess.room_id == p.room_id {
+            state.sessions.remove(&sess.session_id).await;
+        }
+    }
+
+    info!(
+        target: "rpc",
+        admin_user_id = auth.user_id,
+        room_id = p.room_id,
+        target_owner = room.owner_user_id,
+        target_code = %room.code,
+        "admin destroyed room"
+    );
+
+    HandlerOutput {
+        result: Ok(serde_json::to_value(OkResult { ok: true }).unwrap()),
+        side_effect: SideEffect::None,
     }
 }
 

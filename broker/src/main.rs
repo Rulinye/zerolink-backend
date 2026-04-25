@@ -20,7 +20,7 @@ use crate::storage::rooms::RoomRepo;
 use crate::storage::Storage;
 use crate::verify_client::VerifyClient;
 use crate::ws::broadcast::BroadcastHub;
-use crate::ws::protocol::{MemberLeftEvent, RoomEvent};
+use crate::ws::protocol::{MemberLeftEvent, RoomDestroyedEvent, RoomEvent};
 use crate::ws::session::SessionStore;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -102,9 +102,24 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Periodically drain expired-grace sessions, broadcasting member_left
-/// and deleting member rows. Also transitions rooms to empty_grace
-/// when a leaver was the last member.
+/// Background GC task. Three responsibilities, all on the same 5s tick:
+///
+///   1. Session-grace expiry: a ws disconnect puts a session into
+///      30s grace (B2 mechanism). When the deadline hits without a
+///      resume_session, finalize the leave: delete member row,
+///      broadcast member_left, transition the room to empty_grace
+///      if the leaver was the last member.
+///
+///   2. Room-grace expiry: when a room has been in 'empty_grace' past
+///      its grace_until (5 minutes by default), transition to
+///      'destroyed' and broadcast room_destroyed (reason:
+///      grace_expired). The broadcast hub's channel for that room
+///      is dropped so the few remaining ws receivers (idle
+///      connections that hadn't hit the room) get RecvError::Closed.
+///
+///   3. Hard-delete sweep: rooms in 'destroyed' state for more than
+///      1 hour are physically removed. ON DELETE CASCADE drops
+///      members + traffic in the same statement.
 async fn grace_watchdog(storage: Storage, sessions: SessionStore, broadcast: BroadcastHub) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -113,12 +128,11 @@ async fn grace_watchdog(storage: Storage, sessions: SessionStore, broadcast: Bro
 
     loop {
         tick.tick().await;
-        let expired = sessions.drain_expired().await;
-        if expired.is_empty() {
-            continue;
-        }
-        for rec in expired {
-            let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp();
+
+        // (1) session grace
+        let expired_sessions = sessions.drain_expired().await;
+        for rec in expired_sessions {
             if let Err(e) = member_repo.leave(rec.room_id, rec.user_id).await {
                 warn!(target: "watchdog", err = %e, "leave failed during grace finalize");
                 continue;
@@ -154,6 +168,48 @@ async fn grace_watchdog(storage: Storage, sessions: SessionStore, broadcast: Bro
                 session_id = %rec.session_id,
                 "grace expired; member left"
             );
+        }
+
+        // (2) room empty_grace expiry -> destroyed
+        match room_repo.gc_expired_grace_ids(now).await {
+            Ok(ids) => {
+                for rid in ids {
+                    let _ = broadcast
+                        .send(
+                            rid,
+                            RoomEvent::RoomDestroyed(RoomDestroyedEvent {
+                                room_id: rid,
+                                reason: "grace_expired".to_string(),
+                            }),
+                        )
+                        .await;
+                    broadcast.drop_room(rid).await;
+                    if let Err(e) = room_repo.destroy(rid, now).await {
+                        warn!(
+                            target: "watchdog",
+                            err = %e,
+                            room_id = rid,
+                            "room grace destroy failed"
+                        );
+                    } else {
+                        info!(
+                            target: "watchdog",
+                            room_id = rid,
+                            "empty_grace expired; room destroyed"
+                        );
+                    }
+                }
+            }
+            Err(e) => warn!(target: "watchdog", err = %e, "gc_expired_grace_ids failed"),
+        }
+
+        // (3) hard-delete destroyed rooms older than 1 hour. ON DELETE
+        //     CASCADE wipes their members + traffic rows.
+        let cutoff = now - 3600;
+        match room_repo.hard_delete_old_destroyed(cutoff).await {
+            Ok(0) => {}
+            Ok(n) => info!(target: "watchdog", count = n, "hard-deleted old destroyed rooms"),
+            Err(e) => warn!(target: "watchdog", err = %e, "hard-delete sweep failed"),
         }
     }
 }

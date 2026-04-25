@@ -240,9 +240,25 @@ async fn handle_client_text(
     let msg: ClientMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
-            warn!(target: "ws", err = %e, "bad client frame");
-            // Don't close on a parse error; the client may recover.
-            return Ok(());
+            warn!(target: "ws", err = %e, "bad client frame; closing ws");
+            // Try to extract an id field and reply with bad_params so
+            // the client (e.g. websocat) doesn't hang waiting for a
+            // response that never comes. Best-effort; if even the id
+            // extraction fails, just close.
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+                if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                    let res = crate::ws::protocol::RpcResponse::err(
+                        id.to_string(),
+                        "bad_params",
+                        format!("malformed frame: {e}"),
+                    );
+                    let body = serde_json::to_string(&crate::ws::protocol::ServerMessage::Res(res))
+                        .unwrap_or_default();
+                    let _ = socket.send(Message::Text(body)).await;
+                }
+            }
+            // Force close — bad frames signal a misbehaving client.
+            return Err(());
         }
     };
 
@@ -262,10 +278,16 @@ async fn handle_client_text(
                     handlers::handle_join_room(state, auth, req.params, in_room_flag).await
                 }
                 "leave_room" => handlers::handle_leave_room(state, auth, in_room_pair).await,
-                "destroy_room" => handlers::handle_destroy_room(state, auth, in_room_pair).await,
+                "destroy_room" => {
+                    handlers::handle_destroy_room(state, auth, req.params, in_room_pair).await
+                }
                 "list_my_rooms" => handlers::handle_list_my_rooms(state, auth).await,
                 "resume_session" => {
                     handlers::handle_resume_session(state, auth, req.params, in_room_flag).await
+                }
+                "admin_list_all_rooms" => handlers::handle_admin_list_all_rooms(state, auth).await,
+                "admin_destroy_room" => {
+                    handlers::handle_admin_destroy_room(state, auth, req.params).await
                 }
                 other => HandlerOutput {
                     result: Err(crate::ws::protocol::RpcError {

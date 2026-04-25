@@ -111,9 +111,28 @@ pub struct JoinRoomParams {
     pub code: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct DestroyRoomParams {
+    /// Optional room_id. When the caller is currently in a room
+    /// (via this WS), broker uses the in-room id and ignores this
+    /// field. When the caller is NOT in a room (e.g. owner closing
+    /// their own empty_grace room from the search-rooms UI), this
+    /// field is REQUIRED and must reference a room owned by the
+    /// caller. Admins can target any room id (see is_admin check
+    /// in handle_destroy_room).
+    #[serde(default)]
+    pub room_id: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ResumeSessionParams {
     pub session_id: String,
+}
+
+/// Params for admin_destroy_room. room_id is required.
+#[derive(Debug, Deserialize)]
+pub struct AdminDestroyRoomParams {
+    pub room_id: i64,
 }
 
 // ----- per-method result shapes -----
@@ -161,6 +180,28 @@ pub struct MyRoomEntry {
     pub created_at: i64,
     pub state: String,
     pub member_count: i64,
+}
+
+/// Per-room entry in the admin view. Includes owner identity and
+/// state machine fields (last_active_at, grace_until) that the
+/// owner-facing list_my_rooms response omits.
+#[derive(Debug, Serialize)]
+pub struct AdminRoomEntry {
+    pub room_id: i64,
+    pub code: String,
+    pub code_display: String,
+    pub owner_user_id: i64,
+    pub owner_username: String,
+    pub state: String,
+    pub created_at: i64,
+    pub last_active_at: i64,
+    pub grace_until: Option<i64>,
+    pub member_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminListAllRoomsResult {
+    pub rooms: Vec<AdminRoomEntry>,
 }
 
 #[derive(Debug, Serialize)]
