@@ -8,6 +8,12 @@
 //   - handleAdminCreateInvite: accepts Count + Note + ExpiresInDays (F25).
 //   - handleAdminDeleteInvite (F19): DELETE /api/v1/admin/invites/{code}
 //   - handleAdminExtendInvite (F25): POST /api/v1/admin/invites/{code}/extend
+//
+// Batch 3.3 changes (D3.25):
+//   - handleAdminListUsers exposes used_bytes_main / used_bytes_room
+//     breakdown alongside the aggregate used_bytes.
+//   - handleAdminSetUserQuota validates the new cap against the
+//     combined total (TotalUsedBytes), with a clearer error message.
 
 package server
 
@@ -34,12 +40,14 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, len(users))
 	for i, u := range users {
 		row := map[string]any{
-			"id":          u.ID,
-			"username":    u.Username,
-			"is_admin":    u.IsAdmin,
-			"is_disabled": u.IsEffectivelyDisabled(time.Now()),
-			"created_at":  u.CreatedAt.Format(time.RFC3339),
-			"used_bytes":  u.UsedBytes,
+			"id":              u.ID,
+			"username":        u.Username,
+			"is_admin":        u.IsAdmin,
+			"is_disabled":     u.IsEffectivelyDisabled(time.Now()),
+			"created_at":      u.CreatedAt.Format(time.RFC3339),
+			"used_bytes":      u.TotalUsedBytes(),
+			"used_bytes_main": u.UsedBytesMain,
+			"used_bytes_room": u.UsedBytesRoom,
 		}
 		if u.LastLoginAt != nil {
 			row["last_login_at"] = u.LastLoginAt.Format(time.RFC3339)
@@ -155,9 +163,10 @@ func (s *Server) handleAdminSetUserQuota(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "quota_bytes must be >= 0")
 			return
 		}
-		if *req.QuotaBytes < u.UsedBytes {
+		// D3.25: cap is a single combined ceiling against main + room.
+		if *req.QuotaBytes < u.TotalUsedBytes() {
 			writeError(w, http.StatusBadRequest,
-				"new quota would be below current used_bytes")
+				"new quota would be below current used_bytes (main + room)")
 			return
 		}
 	}

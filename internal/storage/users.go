@@ -7,6 +7,15 @@
 //     PickDueForQuotaReset, ResetUsedBytes.
 //   - IsEffectivelyDisabled helper centralizes the "is this user currently
 //     banned" logic so middleware and handlers stay consistent.
+//
+// Batch 3.3 (Phase 3) changes (D3.25):
+//   - UsedBytes is split into UsedBytesMain (sing-box / vless traffic) and
+//     UsedBytesRoom (broker L3 relay traffic). Quota cap remains a single
+//     combined ceiling — the split is for diagnostic visibility only.
+//   - AddUsedBytes split into AddUsedBytesMain and AddUsedBytesRoom.
+//   - TotalUsedBytes helper returns the sum (= what quota enforcement
+//     compares against QuotaBytes).
+//   - ResetUsedBytes zeroes both columns at month boundary.
 
 package storage
 
@@ -34,13 +43,21 @@ type User struct {
 	// IsDisabled=false means "not disabled".
 	DisabledUntil *time.Time
 
-	// QuotaBytes is the monthly cap. nil means unlimited.
+	// QuotaBytes is the monthly cap. nil means unlimited. Quota is checked
+	// against TotalUsedBytes() (= UsedBytesMain + UsedBytesRoom), per D3.25.
 	QuotaBytes *int64
 
-	// UsedBytes is the running counter for the current billing period.
-	UsedBytes int64
+	// UsedBytesMain is the running counter for the main connection
+	// (sing-box / vless+reality) for the current billing period.
+	// Renamed from UsedBytes in Batch 3.3 (migration 0004).
+	UsedBytesMain int64
 
-	// QuotaResetAt is when UsedBytes will next be zeroed.
+	// UsedBytesRoom is the running counter for room L3 relay traffic
+	// reported by brokers (Batch 3.3+, D3.25). Combined with
+	// UsedBytesMain against QuotaBytes — split is diagnostic only.
+	UsedBytesRoom int64
+
+	// QuotaResetAt is when both Used* counters will next be zeroed.
 	QuotaResetAt *time.Time
 
 	// PasswordChangedAt, when non-nil, invalidates any JWT whose iat is
@@ -61,6 +78,14 @@ func (u *User) IsEffectivelyDisabled(now time.Time) bool {
 		return u.DisabledUntil.After(now)
 	}
 	return u.IsDisabled
+}
+
+// TotalUsedBytes returns UsedBytesMain + UsedBytesRoom — the combined
+// counter that quota enforcement compares against QuotaBytes (D3.25).
+// Handlers that previously exposed a single "used_bytes" field should
+// use this for the aggregate, plus expose the breakdown separately.
+func (u *User) TotalUsedBytes() int64 {
+	return u.UsedBytesMain + u.UsedBytesRoom
 }
 
 // UserRepo is the repository for the users table.
@@ -89,8 +114,9 @@ func (r *UserRepo) Create(ctx context.Context, username, passwordHash string, is
 
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO users (username, password_hash, is_admin, is_disabled,
-		                   quota_bytes, used_bytes, quota_reset_at)
-		VALUES (?, ?, ?, 0, ?, 0, ?)
+		                   quota_bytes, used_bytes_main, used_bytes_room,
+		                   quota_reset_at)
+		VALUES (?, ?, ?, 0, ?, 0, 0, ?)
 	`, username, passwordHash, boolToInt(isAdmin), defaultQuota, nextReset)
 	if err != nil {
 		if isUniqueErr(err) {
@@ -179,24 +205,41 @@ func (r *UserRepo) SetDisabled(ctx context.Context, id int64, disable bool, unti
 
 // SetQuota updates the monthly cap. pass nil for unlimited.
 //
-// Validation: caller MUST ensure newQuota >= current used_bytes when non-nil;
-// this method does not enforce it (handler does the check with a clearer
-// error message to the user).
+// Validation: caller MUST ensure newQuota >= current TotalUsedBytes when
+// non-nil; this method does not enforce it (handler does the check with a
+// clearer error message to the user).
 func (r *UserRepo) SetQuota(ctx context.Context, id int64, newQuota *int64) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE users SET quota_bytes = ? WHERE id = ?`, newQuota, id)
 	return err
 }
 
-// AddUsedBytes atomically increments used_bytes. Called by Phase 3 vswitch
-// via an internal API (not in Batch 3a), exposed here so handler logic has
-// a place to hang off of.
-func (r *UserRepo) AddUsedBytes(ctx context.Context, id int64, delta int64) error {
+// ----- Batch 3.3 additions (D3.25) --------------------------------------------
+
+// AddUsedBytesMain atomically increments used_bytes_main. Will be called
+// by the sing-box accounting integration (deferred — no caller in 3.3
+// itself; counter remains driven by the existing path). Kept symmetric
+// with AddUsedBytesRoom for storage-layer cleanliness.
+func (r *UserRepo) AddUsedBytesMain(ctx context.Context, id int64, delta int64) error {
 	if delta == 0 {
 		return nil
 	}
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE users SET used_bytes = used_bytes + ? WHERE id = ?`, delta, id)
+		`UPDATE users SET used_bytes_main = used_bytes_main + ? WHERE id = ?`, delta, id)
+	return err
+}
+
+// AddUsedBytesRoom atomically increments used_bytes_room. Called by the
+// broker via the /api/v1/traffic/report ingestion path (Batch 3.3 G7) when
+// the broker observes or accepts a client-reported tally for room L3 relay
+// traffic. The traffic accounting design (D3.16 v2) cross-validates client
+// and broker reports before committing.
+func (r *UserRepo) AddUsedBytesRoom(ctx context.Context, id int64, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET used_bytes_room = used_bytes_room + ? WHERE id = ?`, delta, id)
 	return err
 }
 
@@ -225,8 +268,10 @@ func (r *UserRepo) PickDueForQuotaReset(ctx context.Context, max int) ([]int64, 
 	return ids, rows.Err()
 }
 
-// ResetUsedBytes zeros used_bytes and advances quota_reset_at to the 1st of
-// the month after the current reset (preserving month-aligned schedule).
+// ResetUsedBytes zeros BOTH used_bytes_main and used_bytes_room and advances
+// quota_reset_at to the 1st of the month after the current reset (preserving
+// month-aligned schedule). Called by the monthly reset worker
+// (internal/cron/quota_reset.go).
 func (r *UserRepo) ResetUsedBytes(ctx context.Context, id int64) error {
 	// Fetch current reset_at to compute next one deterministically.
 	var cur sql.NullTime
@@ -241,8 +286,9 @@ func (r *UserRepo) ResetUsedBytes(ctx context.Context, id int64) error {
 	next := firstOfNextMonthLocal(base)
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE users
-		   SET used_bytes = 0,
-		       quota_reset_at = ?
+		   SET used_bytes_main = 0,
+		       used_bytes_room = 0,
+		       quota_reset_at  = ?
 		 WHERE id = ?
 	`, next, id)
 	return err
@@ -253,7 +299,9 @@ func (r *UserRepo) ResetUsedBytes(ctx context.Context, id int64) error {
 const userColumns = `
 	id, username, password_hash, is_admin, is_disabled,
 	created_at, last_login_at,
-	disabled_until, quota_bytes, used_bytes, quota_reset_at, password_changed_at
+	disabled_until, quota_bytes,
+	used_bytes_main, used_bytes_room,
+	quota_reset_at, password_changed_at
 `
 
 var (
@@ -275,7 +323,9 @@ func scanUser(s scanner) (*User, error) {
 	err := s.Scan(
 		&u.ID, &u.Username, &u.PasswordHash, &isAdmin, &isDisabled,
 		&u.CreatedAt, &lastLogin,
-		&disabledUntil, &quotaBytes, &u.UsedBytes, &quotaResetAt, &passwordChangedAt,
+		&disabledUntil, &quotaBytes,
+		&u.UsedBytesMain, &u.UsedBytesRoom,
+		&quotaResetAt, &passwordChangedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

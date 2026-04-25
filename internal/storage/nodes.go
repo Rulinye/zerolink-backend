@@ -17,6 +17,14 @@ import (
 // parameters" (ConfigJSON / params) from "outbound tuning"
 // (OutboundConfig / outbound_config). Defaults to "{}" so reads always
 // produce well-formed JSON.
+//
+// Batch 3.3 additions (migration 0004): broker capability. A node may
+// run a broker daemon for room rendezvous + L3 relay. BrokerEndpoint
+// and BrokerShortID are nullable (nil means "this node has no broker").
+// HasBroker is a denormalized convenience flag — true iff BrokerEndpoint
+// is non-nil — so client UI can gate the room feature without parsing
+// endpoints. Maintained at write time by the caller (typically
+// import-nodes from Ansible inventory).
 type Node struct {
 	ID             int64
 	Name           string
@@ -26,9 +34,14 @@ type Node struct {
 	Protocol       string
 	ConfigJSON     string
 	OutboundConfig string
-	IsEnabled      bool
-	SortOrder      int
-	UpdatedAt      time.Time
+
+	BrokerEndpoint *string
+	BrokerShortID  *string
+	HasBroker      bool
+
+	IsEnabled bool
+	SortOrder int
+	UpdatedAt time.Time
 }
 
 // NodeRepo holds CRUD on the nodes table.
@@ -41,14 +54,22 @@ type NodeRepo struct{ db *sql.DB }
 // Group 9a: Upsert now also sets/updates outbound_config. Callers that
 // don't have a value should set n.OutboundConfig = "{}" (the column's
 // own default applies on INSERT but not on UPDATE through this path).
+//
+// Batch 3.3: Upsert now also writes broker_endpoint / broker_short_id /
+// has_broker. Caller is responsible for keeping HasBroker consistent
+// with BrokerEndpoint != nil.
 func (r *NodeRepo) Upsert(ctx context.Context, n *Node) error {
 	oc := n.OutboundConfig
 	if oc == "" {
 		oc = "{}"
 	}
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO nodes (name, region, address, port, protocol, config_json, outbound_config, is_enabled, sort_order, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO nodes (
+			name, region, address, port, protocol, config_json, outbound_config,
+			broker_endpoint, broker_short_id, has_broker,
+			is_enabled, sort_order, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(name) DO UPDATE SET
 			region          = excluded.region,
 			address         = excluded.address,
@@ -56,10 +77,14 @@ func (r *NodeRepo) Upsert(ctx context.Context, n *Node) error {
 			protocol        = excluded.protocol,
 			config_json     = excluded.config_json,
 			outbound_config = excluded.outbound_config,
+			broker_endpoint = excluded.broker_endpoint,
+			broker_short_id = excluded.broker_short_id,
+			has_broker      = excluded.has_broker,
 			is_enabled      = excluded.is_enabled,
 			sort_order      = excluded.sort_order,
 			updated_at      = CURRENT_TIMESTAMP
 	`, n.Name, n.Region, n.Address, n.Port, n.Protocol, n.ConfigJSON, oc,
+		nullStr(n.BrokerEndpoint), nullStr(n.BrokerShortID), boolToInt(n.HasBroker),
 		boolToInt(n.IsEnabled), n.SortOrder)
 	return err
 }
@@ -87,13 +112,18 @@ func (r *NodeRepo) DeleteMissing(ctx context.Context, keepNames []string) (int64
 	return res.RowsAffected()
 }
 
+// nodeSelectColumns is the canonical column list for SELECT * style reads
+// kept in one place so Get / GetByName / List stay in sync.
+const nodeSelectColumns = `
+	id, name, region, address, port, protocol, config_json, outbound_config,
+	broker_endpoint, broker_short_id, has_broker,
+	is_enabled, sort_order, updated_at
+`
+
 // Get loads a node by id. Returns ErrNotFound if missing.
 func (r *NodeRepo) Get(ctx context.Context, id int64) (*Node, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT id, name, region, address, port, protocol, config_json,
-		       outbound_config, is_enabled, sort_order, updated_at
-		FROM nodes WHERE id = ?
-	`, id)
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+nodeSelectColumns+` FROM nodes WHERE id = ?`, id)
 	return scanNode(row)
 }
 
@@ -101,19 +131,15 @@ func (r *NodeRepo) Get(ctx context.Context, id int64) (*Node, error) {
 // Used by the import-nodes CLI to detect whether an upsert would actually
 // change anything, so Ansible's `changed_when` can report honestly.
 func (r *NodeRepo) GetByName(ctx context.Context, name string) (*Node, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT id, name, region, address, port, protocol, config_json,
-		       outbound_config, is_enabled, sort_order, updated_at
-		FROM nodes WHERE name = ?
-	`, name)
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+nodeSelectColumns+` FROM nodes WHERE name = ?`, name)
 	return scanNode(row)
 }
 
 // List returns nodes ordered by sort_order, name. If onlyEnabled is true,
 // disabled nodes are filtered out (this is what end users see).
 func (r *NodeRepo) List(ctx context.Context, onlyEnabled bool) ([]*Node, error) {
-	q := `SELECT id, name, region, address, port, protocol, config_json,
-	             outbound_config, is_enabled, sort_order, updated_at FROM nodes`
+	q := `SELECT ` + nodeSelectColumns + ` FROM nodes`
 	if onlyEnabled {
 		q += ` WHERE is_enabled = 1`
 	}
@@ -136,9 +162,12 @@ func (r *NodeRepo) List(ctx context.Context, onlyEnabled bool) ([]*Node, error) 
 
 func scanNode(s scanner) (*Node, error) {
 	var n Node
-	var enabled int
+	var enabled, hasBroker int
+	var brokerEndpoint, brokerShortID sql.NullString
 	err := s.Scan(&n.ID, &n.Name, &n.Region, &n.Address, &n.Port, &n.Protocol,
-		&n.ConfigJSON, &n.OutboundConfig, &enabled, &n.SortOrder, &n.UpdatedAt)
+		&n.ConfigJSON, &n.OutboundConfig,
+		&brokerEndpoint, &brokerShortID, &hasBroker,
+		&enabled, &n.SortOrder, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -146,6 +175,15 @@ func scanNode(s scanner) (*Node, error) {
 		return nil, err
 	}
 	n.IsEnabled = enabled != 0
+	n.HasBroker = hasBroker != 0
+	if brokerEndpoint.Valid {
+		s := brokerEndpoint.String
+		n.BrokerEndpoint = &s
+	}
+	if brokerShortID.Valid {
+		s := brokerShortID.String
+		n.BrokerShortID = &s
+	}
 	// Defensive: NOT NULL DEFAULT '{}' means this should never be empty,
 	// but a manual SQL UPDATE could clear it. Keep response well-formed.
 	if n.OutboundConfig == "" {
@@ -163,4 +201,15 @@ func repeatComma(n int) string {
 		out = append(out, ',', '?')
 	}
 	return string(out)
+}
+
+// nullStr converts a *string to a database/sql-compatible value, mapping
+// nil to a SQL NULL. Used for the broker_endpoint and broker_short_id
+// columns where the empty string and NULL are distinct (NULL means
+// "this node has no broker"; empty string would be a misconfiguration).
+func nullStr(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

@@ -39,6 +39,12 @@ type DB struct {
 	Subscriptions *SubscriptionRepo
 	Traffic       *TrafficRepo
 	Tokens        *RevokedTokenRepo
+
+	// Batch 3.3: ServiceTokens are Bearer credentials issued to broker
+	// daemons so they can authenticate to /api/v1/auth/verify when
+	// reverse-validating client JWTs. One token per broker, provisioned
+	// via Ansible vault.
+	ServiceTokens *ServiceTokenRepo
 }
 
 // Open opens (or creates) the SQLite database at path, applies any pending
@@ -75,6 +81,7 @@ func Open(path string) (*DB, error) {
 	db.Subscriptions = &SubscriptionRepo{db: conn}
 	db.Traffic = &TrafficRepo{db: conn}
 	db.Tokens = &RevokedTokenRepo{db: conn}
+	db.ServiceTokens = newServiceTokenRepo(conn)
 	return db, nil
 }
 
