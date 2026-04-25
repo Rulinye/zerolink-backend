@@ -1,0 +1,126 @@
+name: broker release
+
+# Build the broker crate for linux/amd64 and linux/arm64 and publish a
+# GitHub release on every `broker-v*` tag. The Ansible role downloads
+# the appropriate binary by version + arch.
+#
+# Why a separate workflow from the backend build:
+#   - The broker is a Rust crate inside the same repo as the Go backend;
+#     coupling their builds means any backend tag rebuilds the broker
+#     and vice versa, which is wasteful and conflates release notes.
+#   - Different toolchains (cargo vs go), different test commands,
+#     different compile times.
+#
+# Trigger:
+#   - Manual dispatch (any branch).
+#   - Push of a tag matching `broker-v*` (e.g. `broker-v0.3.0-rc1`).
+#     The release is created only on the tag path.
+
+on:
+  push:
+    tags:
+      - 'broker-v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch_label: amd64
+          - target: aarch64-unknown-linux-gnu
+            arch_label: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: install cross-compile linker (arm64)
+        if: matrix.arch_label == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            broker/target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('broker/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: build (release)
+        working-directory: broker
+        env:
+          SQLX_OFFLINE: "true"
+          # arm64 cross-link
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          mkdir -p ../dist
+          cp target/${{ matrix.target }}/release/zerolink-broker \
+             ../dist/zerolink-broker-linux-${{ matrix.arch_label }}
+
+      - name: sha256
+        working-directory: dist
+        run: |
+          sha256sum zerolink-broker-linux-${{ matrix.arch_label }} \
+            > zerolink-broker-linux-${{ matrix.arch_label }}.sha256
+          cat zerolink-broker-linux-${{ matrix.arch_label }}.sha256
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerolink-broker-linux-${{ matrix.arch_label }}
+          path: |
+            dist/zerolink-broker-linux-${{ matrix.arch_label }}
+            dist/zerolink-broker-linux-${{ matrix.arch_label }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/broker-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: zerolink-broker-linux-*
+          merge-multiple: true
+
+      - name: combined SHA256SUMS
+        working-directory: dist
+        run: |
+          # Drop the per-arch .sha256 files in favor of a single
+          # SHA256SUMS file; matches the layout the backend release uses.
+          rm -f *.sha256
+          sha256sum zerolink-broker-linux-* > SHA256SUMS
+          ls -la
+
+      - name: github release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/zerolink-broker-linux-amd64
+            dist/zerolink-broker-linux-arm64
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
