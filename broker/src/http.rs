@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::config::Config;
+use crate::datapath::{DatapathInfo, PathMap};
 use crate::storage::Storage;
 use crate::verify_client::VerifyClient;
 use crate::ws::broadcast::BroadcastHub;
@@ -18,6 +19,8 @@ pub struct AppState {
     pub storage: Storage,
     pub sessions: SessionStore,
     pub broadcast: BroadcastHub,
+    pub datapath: Arc<DatapathInfo>,
+    pub datapath_paths: PathMap,
     pub version: &'static str,
 }
 

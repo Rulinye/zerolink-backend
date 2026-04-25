@@ -141,6 +141,15 @@ impl SessionStore {
             .map(clone_record)
     }
 
+    /// Find a session by its session_id. Used by the QUIC datapath
+    /// during the bind-frame handshake to validate that the client
+    /// quoting `session_id` actually has a matching record (and that
+    /// it's currently bound, not in grace).
+    pub async fn find_by_session_id(&self, session_id: &str) -> Option<SessionRecord> {
+        let inner = self.inner.lock().await;
+        inner.sessions.get(session_id).map(clone_record)
+    }
+
     /// Detach a ws from its session. If `binding` matches the
     /// session's current bound_ws, the session enters grace.
     /// Otherwise (the session has already been re-bound to a newer

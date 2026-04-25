@@ -31,6 +31,13 @@ use std::time::Duration;
 pub struct Config {
     pub listen_http: String,
     pub listen_quic: String,
+
+    /// Externally reachable host:port the broker exposes to clients
+    /// for QUIC datapath connections. In dev defaults to listen_quic;
+    /// in prod set this to the broker's public IP/hostname:port that
+    /// is reachable from outside (when listen_quic binds to 0.0.0.0).
+    pub datapath_external_host: String,
+
     pub db_path: String,
     pub backend_url: String,
     pub backend_fingerprint: String,
@@ -47,6 +54,10 @@ impl Config {
     pub fn load() -> Result<Self> {
         let listen_http = env_or("ZL_BROKER_LISTEN_HTTP", "0.0.0.0:7842");
         let listen_quic = env_or("ZL_BROKER_LISTEN_QUIC", "0.0.0.0:7843");
+        let datapath_external_host = env_or("ZL_BROKER_DATAPATH_EXTERNAL_HOST", &listen_quic);
+        if datapath_external_host.trim().is_empty() {
+            return Err(anyhow!("ZL_BROKER_DATAPATH_EXTERNAL_HOST is empty"));
+        }
         let db_path = env_or("ZL_BROKER_DB_PATH", "/var/lib/zerolink-broker/broker.db");
         let backend_url = env_or("ZL_BROKER_BACKEND_URL", "https://168.107.55.126:8443");
 
@@ -74,6 +85,7 @@ impl Config {
         Ok(Config {
             listen_http,
             listen_quic,
+            datapath_external_host,
             db_path,
             backend_url,
             backend_fingerprint,

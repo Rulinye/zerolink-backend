@@ -189,6 +189,8 @@ pub async fn handle_create_room(
         room_id: room.id,
         code: room.code,
         code_display,
+        quic_endpoint: state.datapath.endpoint.clone(),
+        quic_fingerprint: state.datapath.fingerprint.clone(),
     })
     .expect("CreateRoomResult serializable");
 
@@ -363,6 +365,8 @@ pub async fn handle_join_room(
         code: room.code,
         code_display,
         members,
+        quic_endpoint: state.datapath.endpoint.clone(),
+        quic_fingerprint: state.datapath.fingerprint.clone(),
     })
     .expect("JoinRoomResult serializable");
 
@@ -512,6 +516,7 @@ pub async fn handle_destroy_room(
         .await;
 
     state.broadcast.drop_room(room_id).await;
+    state.datapath_paths.drop_room(room_id).await;
     if let Some(sid) = session_id_for_cleanup {
         // This WS was bound to the room — cleanup the session it knew.
         state.sessions.remove(&sid).await;
@@ -668,6 +673,8 @@ pub async fn handle_resume_session(
         code: room.code,
         code_display,
         members,
+        quic_endpoint: state.datapath.endpoint.clone(),
+        quic_fingerprint: state.datapath.fingerprint.clone(),
     })
     .expect("ResumeSessionResult serializable");
 
@@ -778,6 +785,7 @@ pub async fn handle_admin_destroy_room(
         )
         .await;
     state.broadcast.drop_room(p.room_id).await;
+    state.datapath_paths.drop_room(p.room_id).await;
 
     // The owner of the destroyed room may currently have an active
     // session bound to it — find it via the by_user index and remove

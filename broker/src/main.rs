@@ -1,6 +1,7 @@
 //! zerolink-broker — room signaling + L3 datapath relay daemon.
 
 mod config;
+mod datapath;
 mod http;
 mod storage;
 mod verify_client;
@@ -14,6 +15,7 @@ use tokio::signal;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::datapath::{generate_cert, start_server, DatapathInfo};
 use crate::http::AppState;
 use crate::storage::members::MemberRepo;
 use crate::storage::rooms::RoomRepo;
@@ -49,6 +51,18 @@ async fn main() -> anyhow::Result<()> {
 
     let storage = Storage::open(&cfg.db_path).await.context("open storage")?;
 
+    // Datapath: self-signed cert + start QUIC server. The fingerprint
+    // is published to clients via WS RPC responses.
+    let dp_cert = generate_cert(&cfg.datapath_external_host).context("datapath cert generate")?;
+    let datapath_info = Arc::new(DatapathInfo {
+        endpoint: cfg.datapath_external_host.clone(),
+        fingerprint: dp_cert.fingerprint_hex.clone(),
+    });
+    let dp_listen: std::net::SocketAddr = cfg
+        .listen_quic
+        .parse()
+        .context("parse ZL_BROKER_LISTEN_QUIC")?;
+
     let verify = Arc::new(
         VerifyClient::new(
             cfg.backend_url.clone(),
@@ -63,12 +77,25 @@ async fn main() -> anyhow::Result<()> {
     let sessions = SessionStore::new();
     let broadcast = BroadcastHub::new();
 
+    let dp_server = start_server(dp_listen, &dp_cert, sessions.clone())
+        .context("datapath quinn server start")?;
+    let datapath_paths = dp_server.paths.clone();
+    info!(
+        target: "boot",
+        listen = %dp_listen,
+        external = %datapath_info.endpoint,
+        fingerprint = %datapath_info.fingerprint,
+        "datapath listening"
+    );
+
     let state = AppState {
         config: Arc::new(cfg.clone()),
         verify: verify.clone(),
         storage: storage.clone(),
         sessions: sessions.clone(),
         broadcast: broadcast.clone(),
+        datapath: datapath_info.clone(),
+        datapath_paths: datapath_paths.clone(),
         version: VERSION,
     };
 
@@ -86,8 +113,15 @@ async fn main() -> anyhow::Result<()> {
     let watchdog_storage = storage.clone();
     let watchdog_sessions = sessions.clone();
     let watchdog_broadcast = broadcast.clone();
+    let watchdog_paths = datapath_paths.clone();
     let watchdog_task = tokio::spawn(async move {
-        grace_watchdog(watchdog_storage, watchdog_sessions, watchdog_broadcast).await
+        grace_watchdog(
+            watchdog_storage,
+            watchdog_sessions,
+            watchdog_broadcast,
+            watchdog_paths,
+        )
+        .await
     });
 
     shutdown_signal().await;
@@ -120,7 +154,12 @@ async fn main() -> anyhow::Result<()> {
 ///   3. Hard-delete sweep: rooms in 'destroyed' state for more than
 ///      1 hour are physically removed. ON DELETE CASCADE drops
 ///      members + traffic in the same statement.
-async fn grace_watchdog(storage: Storage, sessions: SessionStore, broadcast: BroadcastHub) {
+async fn grace_watchdog(
+    storage: Storage,
+    sessions: SessionStore,
+    broadcast: BroadcastHub,
+    paths_for_watchdog: crate::datapath::PathMap,
+) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let room_repo = RoomRepo::new(storage.pool.clone());
@@ -184,6 +223,7 @@ async fn grace_watchdog(storage: Storage, sessions: SessionStore, broadcast: Bro
                         )
                         .await;
                     broadcast.drop_room(rid).await;
+                    paths_for_watchdog.drop_room(rid).await;
                     if let Err(e) = room_repo.destroy(rid, now).await {
                         warn!(
                             target: "watchdog",

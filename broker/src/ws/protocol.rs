@@ -145,6 +145,10 @@ pub struct CreateRoomResult {
     pub code: String,
     /// Display form: `"<short_id>-<code>"` e.g. "KR-XK7P9R".
     pub code_display: String,
+    /// `host:port` for the QUIC datapath.
+    pub quic_endpoint: String,
+    /// SHA-256 hex of the broker's QUIC TLS cert. Client pins this.
+    pub quic_fingerprint: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +160,8 @@ pub struct JoinRoomResult {
     pub code: String,
     pub code_display: String,
     pub members: Vec<MemberInfo>,
+    pub quic_endpoint: String,
+    pub quic_fingerprint: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -210,6 +216,8 @@ pub struct ResumeSessionResult {
     pub code: String,
     pub code_display: String,
     pub members: Vec<MemberInfo>,
+    pub quic_endpoint: String,
+    pub quic_fingerprint: String,
 }
 
 #[derive(Debug, Serialize)]
