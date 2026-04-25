@@ -51,9 +51,9 @@ jobs:
       - name: list build output
         run: ls -la bin/
 
-      - name: verify all three binaries exist
+      - name: verify all four binaries exist
         run: |
-          for name in zerolink-backend zerolink-backend-admin-create zerolink-backend-import-nodes; do
+          for name in zerolink-backend zerolink-backend-admin-create zerolink-backend-import-nodes zerolink-backend-gen-service-token; do
             file="bin/${name}-linux-${{ matrix.arch }}"
             if [ ! -f "$file" ]; then
               echo "MISSING: $file"
@@ -73,6 +73,7 @@ jobs:
             bin/zerolink-backend-linux-${{ matrix.arch }}
             bin/zerolink-backend-admin-create-linux-${{ matrix.arch }}
             bin/zerolink-backend-import-nodes-linux-${{ matrix.arch }}
+            bin/zerolink-backend-gen-service-token-linux-${{ matrix.arch }}
             bin/SHA256SUMS-${{ matrix.arch }}.txt
           if-no-files-found: error
 
@@ -90,7 +91,7 @@ jobs:
           mkdir -p release
           find dl -type f -exec cp {} release/ \;
           ls -la release/
-      - name: verify all 8 expected files present
+      - name: verify all 10 expected files present
         run: |
           set -e
           for f in \
@@ -100,12 +101,14 @@ jobs:
             zerolink-backend-admin-create-linux-arm64 \
             zerolink-backend-import-nodes-linux-amd64 \
             zerolink-backend-import-nodes-linux-arm64 \
+            zerolink-backend-gen-service-token-linux-amd64 \
+            zerolink-backend-gen-service-token-linux-arm64 \
             SHA256SUMS-amd64.txt \
             SHA256SUMS-arm64.txt
           do
             test -f "release/$f" || { echo "MISSING: $f"; exit 1; }
           done
-          echo "all 8 files present"
+          echo "all 10 files present"
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
