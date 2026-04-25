@@ -27,6 +27,13 @@ type nodeView struct {
 	Address  string `json:"address"`
 	Port     int    `json:"port"`
 	Protocol string `json:"protocol"`
+
+	// Batch 3.3 G4-1a: broker fields. Pointer types because the storage
+	// layer carries them as nullable; omitempty hides them when the node
+	// has no broker. HasBroker stays bool (zero value is meaningful).
+	BrokerEndpoint *string `json:"broker_endpoint,omitempty"`
+	BrokerShortID  *string `json:"broker_short_id,omitempty"`
+	HasBroker      bool    `json:"has_broker"`
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +47,10 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 		out[i] = nodeView{
 			ID: n.ID, Name: n.Name, Region: n.Region,
 			Address: n.Address, Port: n.Port, Protocol: n.Protocol,
+
+			BrokerEndpoint: n.BrokerEndpoint,
+			BrokerShortID:  n.BrokerShortID,
+			HasBroker:      n.HasBroker,
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": out})
