@@ -39,6 +39,12 @@ type entry struct {
 	Config    map[string]any `json:"config"`
 	Enabled   *bool          `json:"enabled"`
 	SortOrder int            `json:"sort_order"`
+
+	// Batch 3.3 G4-1a-2: optional broker fields. nil/empty when this
+	// node has no broker daemon; HasBroker is false in that case.
+	BrokerEndpoint *string `json:"broker_endpoint,omitempty"`
+	BrokerShortID  *string `json:"broker_short_id,omitempty"`
+	HasBroker      bool    `json:"has_broker,omitempty"`
 }
 
 func main() {
@@ -130,7 +136,10 @@ func main() {
 				existing.Protocol != e.Protocol ||
 				existing.ConfigJSON != string(cfgJSON) ||
 				existing.IsEnabled != enabled ||
-				existing.SortOrder != sortOrder
+				existing.SortOrder != sortOrder ||
+				ptrStrNotEqual(existing.BrokerEndpoint, e.BrokerEndpoint) ||
+				ptrStrNotEqual(existing.BrokerShortID, e.BrokerShortID) ||
+				existing.HasBroker != e.HasBroker
 		}
 
 		err = db.Nodes.Upsert(ctx, &storage.Node{
@@ -142,6 +151,10 @@ func main() {
 			ConfigJSON: string(cfgJSON),
 			IsEnabled:  enabled,
 			SortOrder:  sortOrder,
+
+			BrokerEndpoint: e.BrokerEndpoint,
+			BrokerShortID:  e.BrokerShortID,
+			HasBroker:      e.HasBroker,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "upsert %s: %v\n", e.Name, err)
@@ -162,6 +175,19 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("import-nodes: upserted=%d deleted=%d\n", upsertedChanged, deleted)
+}
+
+// ptrStrNotEqual compares two *string for inequality, treating nil and ""
+// as equivalent (both "absent"). Used by the changed-detection logic.
+func ptrStrNotEqual(a, b *string) bool {
+	av, bv := "", ""
+	if a != nil {
+		av = *a
+	}
+	if b != nil {
+		bv = *b
+	}
+	return av != bv
 }
 
 func versionString() string {
