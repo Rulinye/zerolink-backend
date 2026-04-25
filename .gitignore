@@ -9,3 +9,6 @@ build/
 dev/*.db
 dev/*.db-wal
 dev/*.db-shm
+
+# Build output (Makefile bin/ target)
+bin/
