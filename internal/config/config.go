@@ -14,7 +14,10 @@ import (
 
 // Config is the fully-resolved runtime configuration.
 type Config struct {
-	// Listen is the HTTP listen address, e.g. "127.0.0.1:8080".
+	// Listen is the HTTP plaintext listen address, e.g. "127.0.0.1:8080".
+	// Kept for the dev SSH-tunnel workflow and for Ansible's loopback
+	// post-flight /ping check. Public-facing API access goes through the
+	// TLS listener (TLSListen) when configured.
 	Listen string
 
 	// DBPath is the SQLite file path.
@@ -34,6 +37,34 @@ type Config struct {
 
 	// LogJSON makes slog emit JSON instead of text. Default true (production).
 	LogJSON bool
+
+	// ----- Batch 3.3 Group 1b: TLS listener -----
+	//
+	// When TLSCertPath and TLSKeyPath are both set, an additional HTTPS
+	// listener runs on TLSListen alongside the plaintext Listen address.
+	// The cert is self-signed; verification on the client side (broker
+	// reqwest) happens via leaf certificate sha256 fingerprint pinning,
+	// not CA chain validation. See 0-0link-infra/roles/backend for the
+	// generation task and fingerprint propagation.
+	//
+	// Both paths must be supplied together (or both omitted). Mixing one
+	// with the other returns a config error at startup.
+
+	// TLSListen is the TLS listen address, default "0.0.0.0:8443".
+	TLSListen string
+
+	// TLSCertPath is the path to a PEM-encoded TLS certificate. Empty
+	// disables the TLS listener entirely.
+	TLSCertPath string
+
+	// TLSKeyPath is the path to a PEM-encoded TLS private key. Empty
+	// disables the TLS listener entirely.
+	TLSKeyPath string
+}
+
+// TLSEnabled reports whether the TLS listener should be started.
+func (c *Config) TLSEnabled() bool {
+	return c.TLSCertPath != "" && c.TLSKeyPath != ""
 }
 
 // Load reads configuration from env vars and applies defaults. Returns an
@@ -45,6 +76,10 @@ func Load() (*Config, error) {
 		JWTIssuer:      envOr("ZL_JWT_ISSUER", "zerolink-backend"),
 		AdminUIEnabled: envBool("ZL_ADMIN_UI", true),
 		LogJSON:        envBool("ZL_LOG_JSON", true),
+
+		TLSListen:   envOr("ZL_TLS_LISTEN", "0.0.0.0:8443"),
+		TLSCertPath: os.Getenv("ZL_TLS_CERT_PATH"),
+		TLSKeyPath:  os.Getenv("ZL_TLS_KEY_PATH"),
 	}
 
 	secret := os.Getenv("ZL_JWT_SECRET")
@@ -61,6 +96,14 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: ZL_JWT_TTL invalid: %w", err)
 	}
 	c.JWTTTL = ttl
+
+	// TLS cert and key must be supplied together. Catch the "set one,
+	// forgot the other" misconfiguration at startup rather than on the
+	// first request.
+	if (c.TLSCertPath == "") != (c.TLSKeyPath == "") {
+		return nil, errors.New(
+			"config: ZL_TLS_CERT_PATH and ZL_TLS_KEY_PATH must both be set or both empty")
+	}
 
 	return c, nil
 }

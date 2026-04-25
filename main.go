@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"errors"
 	"flag"
@@ -64,11 +65,16 @@ func run() error {
 	}
 
 	logger := newLogger(cfg.LogJSON)
-	logger.Info("starting",
+	startAttrs := []any{
 		"version", versionString(),
 		"listen", cfg.Listen,
 		"db", cfg.DBPath,
-	)
+		"tls_enabled", cfg.TLSEnabled(),
+	}
+	if cfg.TLSEnabled() {
+		startAttrs = append(startAttrs, "tls_listen", cfg.TLSListen)
+	}
+	logger.Info("starting", startAttrs...)
 
 	db, err := storage.Open(cfg.DBPath)
 	if err != nil {
@@ -108,6 +114,8 @@ func run() error {
 	srv.RunGC(ctx)
 	cron.Run(ctx, db, logger)
 
+	// Plaintext listener — kept on loopback for dev SSH tunnel and for
+	// Ansible's post-flight /ping check.
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),
@@ -115,11 +123,42 @@ func run() error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
+	// TLS listener — broker reverse-verify and future client direct.
+	// Self-signed cert; clients pin the leaf fingerprint, not a CA.
+	// Only constructed when both cert and key paths are set; missing
+	// files are detected at ListenAndServeTLS time and surfaced via
+	// errCh below.
+	var httpsSrv *http.Server
+	if cfg.TLSEnabled() {
+		httpsSrv = &http.Server{
+			Addr:              cfg.TLSListen,
+			Handler:           srv.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		}
+	}
+
+	// Buffered to 2 so neither goroutine blocks on send if shutdown wins.
+	errCh := make(chan error, 2)
+
 	go func() {
-		logger.Info("listening", "addr", cfg.Listen)
+		logger.Info("listening (plaintext)", "addr", cfg.Listen)
 		errCh <- httpSrv.ListenAndServe()
 	}()
+
+	if httpsSrv != nil {
+		go func() {
+			logger.Info("listening (TLS)",
+				"addr", cfg.TLSListen,
+				"cert", cfg.TLSCertPath)
+			errCh <- httpsSrv.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath)
+		}()
+	} else {
+		logger.Warn("TLS listener disabled (ZL_TLS_CERT_PATH / ZL_TLS_KEY_PATH not set)")
+	}
 
 	select {
 	case <-ctx.Done():
@@ -133,8 +172,14 @@ func run() error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(
 		context.Background(), 15*time.Second)
 	defer shutdownCancel()
+
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("graceful shutdown failed", "err", err)
+		logger.Warn("plaintext graceful shutdown failed", "err", err)
+	}
+	if httpsSrv != nil {
+		if err := httpsSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("TLS graceful shutdown failed", "err", err)
+		}
 	}
 	logger.Info("stopped")
 	return nil
