@@ -22,6 +22,11 @@ axum = { version = "0.7", features = ["ws", "macros"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace"] }
 
+# Stream/Sink combinators for the WS connection loop. axum re-exports
+# WebSocket but the .next() / .send() helpers come from futures-util's
+# Stream/Sink traits.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
 # --- HTTP client (reverse-verify against backend) -------------------------
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
@@ -42,7 +47,7 @@ hex = "0.4"
 anyhow = "1"
 thiserror = "1"
 
-# --- random (room codes, generally) ----------------------------------------
+# --- random (room codes, session ids) -------------------------------------
 rand = "0.8"
 
 # --- time + KST month boundary calculation --------------------------------
@@ -64,3 +69,15 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[lints.rust]
+# dead_code is allowed crate-wide because:
+#   - Several storage/* fields and methods are intentional stubs that
+#     get consumed in later sub-commits (2c-3 GC task, 2d datapath,
+#     G7 traffic reporter, Phase 4.1 P2P endpoint fields).
+#   - The crate-level allow inside main.rs only covers the binary
+#     root module; sub-modules need their own allow. The Cargo
+#     [lints] table applies to the whole crate uniformly.
+# When 4.x lands, revisit and remove unused fields whose intended
+# consumer never materialized.
+dead_code = "allow"

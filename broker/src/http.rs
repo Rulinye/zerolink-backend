@@ -1,7 +1,4 @@
 //! HTTP signaling server (axum).
-//!
-//! 2b scope: AppState gains a Storage handle. Endpoints unchanged
-//! (`/ping`, `/version`); 2c lands the WebSocket signaling RPC.
 
 use axum::{routing::get, Json, Router};
 use serde::Serialize;
@@ -11,12 +8,16 @@ use tracing::info;
 use crate::config::Config;
 use crate::storage::Storage;
 use crate::verify_client::VerifyClient;
+use crate::ws::broadcast::BroadcastHub;
+use crate::ws::session::SessionStore;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub verify: Arc<VerifyClient>,
     pub storage: Storage,
+    pub sessions: SessionStore,
+    pub broadcast: BroadcastHub,
     pub version: &'static str,
 }
 
@@ -24,6 +25,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/ping", get(handle_ping))
         .route("/version", get(handle_version))
+        .route("/rpc/ws", get(crate::ws::ws_upgrade))
         .with_state(state)
 }
 

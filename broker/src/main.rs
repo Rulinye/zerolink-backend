@@ -1,24 +1,27 @@
-#![allow(dead_code)] // TODO 2c: remove when fields/methods are wired into RPC handlers
 //! zerolink-broker — room signaling + L3 datapath relay daemon.
-//!
-//! 2b scope: bootstrap now opens a SQLite pool and runs migrations.
-//! Storage handles are wired into AppState but not yet consumed by any
-//! handler — that lands in 2c.
 
 mod config;
 mod http;
 mod storage;
 mod verify_client;
+mod ws;
 
 use anyhow::Context;
+use chrono::Utc;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::http::AppState;
+use crate::storage::members::MemberRepo;
+use crate::storage::rooms::RoomRepo;
 use crate::storage::Storage;
 use crate::verify_client::VerifyClient;
+use crate::ws::broadcast::BroadcastHub;
+use crate::ws::protocol::{MemberLeftEvent, RoomEvent};
+use crate::ws::session::SessionStore;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -44,9 +47,6 @@ async fn main() -> anyhow::Result<()> {
         "starting zerolink-broker"
     );
 
-    // Storage open + migrations applied at boot. Failure at this stage
-    // is fatal — there's no point starting an HTTP listener if we can't
-    // persist room state.
     let storage = Storage::open(&cfg.db_path).await.context("open storage")?;
 
     let verify = Arc::new(
@@ -60,10 +60,15 @@ async fn main() -> anyhow::Result<()> {
         .context("build verify client")?,
     );
 
+    let sessions = SessionStore::new();
+    let broadcast = BroadcastHub::new();
+
     let state = AppState {
         config: Arc::new(cfg.clone()),
         verify: verify.clone(),
         storage: storage.clone(),
+        sessions: sessions.clone(),
+        broadcast: broadcast.clone(),
         version: VERSION,
     };
 
@@ -76,14 +81,81 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Grace watchdog: every 5s, finalize any session whose grace has
+    // expired. This is the B2 mechanism — see ws/session.rs.
+    let watchdog_storage = storage.clone();
+    let watchdog_sessions = sessions.clone();
+    let watchdog_broadcast = broadcast.clone();
+    let watchdog_task = tokio::spawn(async move {
+        grace_watchdog(watchdog_storage, watchdog_sessions, watchdog_broadcast).await
+    });
+
     shutdown_signal().await;
     info!(target: "boot", "shutdown signal received; stopping");
 
     http_task.abort();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), http_task).await;
+    watchdog_task.abort();
+    let _ = tokio::time::timeout(Duration::from_secs(5), http_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), watchdog_task).await;
 
     info!(target: "boot", "stopped");
     Ok(())
+}
+
+/// Periodically drain expired-grace sessions, broadcasting member_left
+/// and deleting member rows. Also transitions rooms to empty_grace
+/// when a leaver was the last member.
+async fn grace_watchdog(storage: Storage, sessions: SessionStore, broadcast: BroadcastHub) {
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let room_repo = RoomRepo::new(storage.pool.clone());
+    let member_repo = MemberRepo::new(storage.pool.clone());
+
+    loop {
+        tick.tick().await;
+        let expired = sessions.drain_expired().await;
+        if expired.is_empty() {
+            continue;
+        }
+        for rec in expired {
+            let now = Utc::now().timestamp();
+            if let Err(e) = member_repo.leave(rec.room_id, rec.user_id).await {
+                warn!(target: "watchdog", err = %e, "leave failed during grace finalize");
+                continue;
+            }
+            let _ = broadcast
+                .send(
+                    rec.room_id,
+                    RoomEvent::MemberLeft(MemberLeftEvent {
+                        room_id: rec.room_id,
+                        user_id: rec.user_id,
+                        username: rec.username.clone(),
+                    }),
+                )
+                .await;
+            let _ = room_repo.touch_activity(rec.room_id, now).await;
+            match member_repo.count_in_room(rec.room_id).await {
+                Ok(0) => {
+                    let grace_secs = 5 * 60;
+                    if let Err(e) = room_repo
+                        .set_empty_grace(rec.room_id, now, grace_secs)
+                        .await
+                    {
+                        warn!(target: "watchdog", err = %e, "set_empty_grace failed");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => warn!(target: "watchdog", err = %e, "count_in_room failed"),
+            }
+            info!(
+                target: "watchdog",
+                user_id = rec.user_id,
+                room_id = rec.room_id,
+                session_id = %rec.session_id,
+                "grace expired; member left"
+            );
+        }
+    }
 }
 
 fn init_logging(json: bool) {
