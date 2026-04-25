@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO members (room_id, user_id, username, joined_at, last_seen_at)\n            VALUES (?, ?, ?, ?, ?)\n            ON CONFLICT(room_id, user_id) DO UPDATE SET\n                last_seen_at = excluded.last_seen_at,\n                username     = excluded.username\n            RETURNING id AS \"id!\", room_id, user_id, username,\n                      joined_at, last_seen_at, public_endpoint\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "room_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "username",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "joined_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_seen_at",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "public_endpoint",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b986b34d2b360d6b96a9192d772bba94fa7097126fc7c227e2cd8740aecdc5a4"
+}

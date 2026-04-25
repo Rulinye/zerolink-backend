@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS n FROM members WHERE room_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "n",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6d069cec5beb1b84a7bbca90b71d1712180e8fef8459f09a4858d58798b3727f"
+}

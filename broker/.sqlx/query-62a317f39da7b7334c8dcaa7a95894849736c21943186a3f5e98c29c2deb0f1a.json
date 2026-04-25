@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE rooms\n               SET state = 'active',\n                   grace_until = NULL,\n                   last_active_at = ?\n             WHERE id = ?\n               AND state = 'empty_grace'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "62a317f39da7b7334c8dcaa7a95894849736c21943186a3f5e98c29c2deb0f1a"
+}

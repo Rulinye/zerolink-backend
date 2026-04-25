@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE rooms SET last_active_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7cc8037d5a89966a5978b9c6a6bcf8465234d67068919a8dc96d7fbabdab4fcd"
+}
