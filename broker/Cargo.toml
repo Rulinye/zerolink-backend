@@ -1,0 +1,68 @@
+[package]
+name = "zerolink-broker"
+version = "0.3.0-rc1"
+edition = "2021"
+publish = false
+description = "0-0link broker daemon: room signaling + L3 datapath relay"
+license = "Proprietary"
+rust-version = "1.75"
+
+[[bin]]
+name = "zerolink-broker"
+path = "src/main.rs"
+
+[dependencies]
+# --- async runtime ---------------------------------------------------------
+tokio = { version = "1", features = [
+    "rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util", "fs",
+] }
+
+# --- HTTP server (signaling) ----------------------------------------------
+# WebSocket support enabled for 2c (signaling RPC + push events).
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace"] }
+
+# --- HTTP client (reverse-verify against backend) -------------------------
+# rustls-tls-manual-roots: we provide our own ServerCertVerifier (fingerprint
+# pinning), so we do NOT want webpki / native CA roots compiled in.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
+
+# --- serde / json ----------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- logging / tracing -----------------------------------------------------
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# --- crypto utilities ------------------------------------------------------
+sha2 = "0.10"
+hex = "0.4"
+
+# --- error handling --------------------------------------------------------
+anyhow = "1"
+thiserror = "1"
+
+# --- QUIC datapath (used in 2d) -------------------------------------------
+# Declared here to keep Cargo.toml stable across the 2a-2e sub-commits.
+# Currently unused; cargo will not link the crate in 2a since no module
+# references it.
+quinn = "0.11"
+
+# --- SQLite (used in 2b) --------------------------------------------------
+# Tokio runtime + rustls + macros + migrate. SQLX_OFFLINE=true via
+# sqlx-data.json (committed to git) so CI builds don't need a live DB.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls", "sqlite", "macros", "migrate",
+] }
+
+[dev-dependencies]
+# Reserved for unit tests in 2c+. Empty for 2a.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
