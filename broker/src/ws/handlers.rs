@@ -23,8 +23,7 @@ use crate::ws::protocol::{
     AdminDestroyRoomParams, AdminListAllRoomsResult, AdminRoomEntry, CreateRoomParams,
     CreateRoomResult, DestroyRoomParams, JoinRoomParams, JoinRoomResult, ListMyRoomsResult,
     MemberInfo, MemberJoinedEvent, MemberLeftEvent, MyRoomEntry, OkResult, ResumeSessionParams,
-    ResumeSessionResult, RoomDestroyedEvent, RoomEvent, RpcError,
-};
+    ResumeSessionResult, RoomDestroyedEvent, RoomEvent, RpcError, RoomInfoParams, RoomInfoResult};
 use crate::ws::session::{SessionError, WsBinding};
 
 /// Authenticated context for a connection. Filled in once at WS upgrade
@@ -686,6 +685,84 @@ pub async fn handle_resume_session(
             binding,
             rx,
         },
+    }
+}
+
+// =====================================================================
+// room_info — non-mutating lookup, any authenticated user
+// =====================================================================
+
+/// Returns public metadata for a single room by code. Used by the
+/// client's "search before join" UX flow so the user can sanity-
+/// check the destination before committing.
+///
+/// Anyone authenticated may call this — same trust assumption as
+/// the rest of the broker (a JWT is a "logged-in user" capability).
+/// Phase 4 may layer private-room ACLs on top.
+pub async fn handle_room_info(
+    state: &AppState,
+    _auth: &WsAuth,
+    params: Json,
+) -> HandlerOutput {
+    let p: RoomInfoParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return err("bad_params", format!("room_info params: {e}")),
+    };
+
+    // Normalize to upper-case to match how codes are stored.
+    let code = p.code.trim().to_uppercase();
+    if code.len() != 6 {
+        return err("bad_params", "code must be 6 chars (bare form)");
+    }
+
+    let room_repo = crate::storage::rooms::RoomRepo::new(state.storage.pool.clone());
+    let member_repo = crate::storage::members::MemberRepo::new(state.storage.pool.clone());
+
+    // get_alive_by_code returns None for destroyed rooms — clients
+    // see "not_found" identically to "no such code", which is the
+    // privacy-correct behavior.
+    let room = match room_repo.get_alive_by_code(&code).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return err("not_found", "no room with this code"),
+        Err(e) => {
+            warn!(target: "rpc", err = %e, "room_info lookup failed");
+            return err("internal", "room_info failed");
+        }
+    };
+
+    let count = member_repo.count_in_room(room.id).await.unwrap_or(0);
+
+    // Resolve owner_username via backend? Cheaper: the backend
+    // verify_client cache only has us, not arbitrary users. We
+    // need a name. We have user_id; the storage layer should
+    // be able to look it up via a small users index, but we
+    // currently don't carry one in the broker side.
+    //
+    // Pragmatic fix: include only owner_user_id (we have it),
+    // let the client look up the username via /api/v1/users/{id}
+    // if it cares. But for the search UX we want a one-shot
+    // human-readable identity.
+    //
+    // Simpler still: we have the username when the user creates
+    // / joins the room — store it on the rooms row. Schema add
+    // is out of scope for this commit; for now return owner_user_id
+    // as a string and let the client format. TODO: add owner_username
+    // column in next migration.
+    let owner_username = format!("user_{}", room.owner_user_id);
+
+    let result = RoomInfoResult {
+        room_id: room.id,
+        code: room.code.clone(),
+        code_display: format!("{}-{}", state.config.short_id, room.code),
+        state: room.state.as_str().to_string(),
+        member_count: count,
+        owner_username,
+        created_at: room.created_at,
+    };
+
+    HandlerOutput {
+        result: Ok(serde_json::to_value(&result).expect("serialize")),
+        side_effect: SideEffect::None,
     }
 }
 

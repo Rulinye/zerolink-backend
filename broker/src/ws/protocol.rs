@@ -13,6 +13,7 @@
 //!   leave_room       {}                                  → {ok: true}
 //!   destroy_room     {}                                  → {ok: true}        (owner only)
 //!   list_my_rooms    {}                                  → {rooms: []}
+//!   room_info        {code}                              → {room_id, code_display, state, member_count, owner_username, created_at}
 //!   resume_session   {session_id}                        → {room_id, members: []}
 //!
 //! `event` names:
@@ -111,6 +112,16 @@ pub struct JoinRoomParams {
     pub code: String,
 }
 
+/// Lookup-only RPC: returns public metadata about a room without
+/// joining. Any authenticated user can call this; we return only
+/// non-sensitive fields. No member roster, no quic_endpoint, no
+/// fingerprint. Phase 4 may add ACLs (private rooms).
+#[derive(Debug, Deserialize)]
+pub struct RoomInfoParams {
+    /// 6-char Crockford base32 code. Bare form.
+    pub code: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct DestroyRoomParams {
     /// Optional room_id. When the caller is currently in a room
@@ -186,6 +197,23 @@ pub struct MyRoomEntry {
     pub created_at: i64,
     pub state: String,
     pub member_count: i64,
+}
+
+/// Public-safe room metadata returned by room_info. Excludes:
+///   - members roster (privacy: don't reveal who's in a room
+///     before the user has decided to join)
+///   - quic_endpoint, quic_fingerprint (only meaningful post-join,
+///     and we don't want them harvested for unsolicited probing)
+///   - last_active_at, grace_until (admin-only fields)
+#[derive(Debug, Serialize)]
+pub struct RoomInfoResult {
+    pub room_id: i64,
+    pub code: String,
+    pub code_display: String,
+    pub state: String,
+    pub member_count: i64,
+    pub owner_username: String,
+    pub created_at: i64,
 }
 
 /// Per-room entry in the admin view. Includes owner identity and
@@ -320,6 +348,36 @@ mod tests {
                 assert_eq!(jp.code, "XK7P9R");
             }
         }
+    }
+
+    #[test]
+    fn room_info_params_roundtrip() {
+        let raw = r#"{"code":"XK7P9R"}"#;
+        let p: RoomInfoParams = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.code, "XK7P9R");
+    }
+
+    #[test]
+    fn room_info_result_serializes() {
+        let r = RoomInfoResult {
+            room_id: 42,
+            code: "XK7P9R".into(),
+            code_display: "KR-XK7P9R".into(),
+            state: "active".into(),
+            member_count: 2,
+            owner_username: "user_1".into(),
+            created_at: 1730000000,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"room_id\":42"));
+        assert!(s.contains("\"code\":\"XK7P9R\""));
+        assert!(s.contains("\"code_display\":\"KR-XK7P9R\""));
+        assert!(s.contains("\"member_count\":2"));
+        assert!(s.contains("\"owner_username\":\"user_1\""));
+        // SECURITY: must NOT leak join-only fields.
+        assert!(!s.contains("quic_endpoint"));
+        assert!(!s.contains("quic_fingerprint"));
+        assert!(!s.contains("members"));
     }
 
     #[test]

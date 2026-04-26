@@ -282,6 +282,7 @@ async fn handle_client_text(
                     handlers::handle_destroy_room(state, auth, req.params, in_room_pair).await
                 }
                 "list_my_rooms" => handlers::handle_list_my_rooms(state, auth).await,
+                "room_info" => handlers::handle_room_info(state, auth, req.params).await,
                 "resume_session" => {
                     handlers::handle_resume_session(state, auth, req.params, in_room_flag).await
                 }
