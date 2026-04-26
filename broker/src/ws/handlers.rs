@@ -732,31 +732,15 @@ pub async fn handle_room_info(
 
     let count = member_repo.count_in_room(room.id).await.unwrap_or(0);
 
-    // Resolve owner_username via backend? Cheaper: the backend
-    // verify_client cache only has us, not arbitrary users. We
-    // need a name. We have user_id; the storage layer should
-    // be able to look it up via a small users index, but we
-    // currently don't carry one in the broker side.
-    //
-    // Pragmatic fix: include only owner_user_id (we have it),
-    // let the client look up the username via /api/v1/users/{id}
-    // if it cares. But for the search UX we want a one-shot
-    // human-readable identity.
-    //
-    // Simpler still: we have the username when the user creates
-    // / joins the room — store it on the rooms row. Schema add
-    // is out of scope for this commit; for now return owner_user_id
-    // as a string and let the client format. TODO: add owner_username
-    // column in next migration.
-    let owner_username = format!("user_{}", room.owner_user_id);
-
+    // owner_username is captured at create_room time (snapshot)
+    // and stored on the rooms row — see schema 0001 line 47.
     let result = RoomInfoResult {
         room_id: room.id,
         code: room.code.clone(),
         code_display: format!("{}-{}", state.config.short_id, room.code),
         state: room.state.as_str().to_string(),
         member_count: count,
-        owner_username,
+        owner_username: room.owner_username.clone(),
         created_at: room.created_at,
     };
 
