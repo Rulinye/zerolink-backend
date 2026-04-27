@@ -38,6 +38,7 @@ type Node struct {
 	BrokerEndpoint *string
 	BrokerShortID  *string
 	HasBroker      bool
+	BrokerEnabled  bool
 
 	IsEnabled bool
 	SortOrder int
@@ -66,10 +67,10 @@ func (r *NodeRepo) Upsert(ctx context.Context, n *Node) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO nodes (
 			name, region, address, port, protocol, config_json, outbound_config,
-			broker_endpoint, broker_short_id, has_broker,
+			broker_endpoint, broker_short_id, has_broker, broker_enabled,
 			is_enabled, sort_order, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(name) DO UPDATE SET
 			region          = excluded.region,
 			address         = excluded.address,
@@ -80,11 +81,12 @@ func (r *NodeRepo) Upsert(ctx context.Context, n *Node) error {
 			broker_endpoint = excluded.broker_endpoint,
 			broker_short_id = excluded.broker_short_id,
 			has_broker      = excluded.has_broker,
+			broker_enabled  = excluded.broker_enabled,
 			is_enabled      = excluded.is_enabled,
 			sort_order      = excluded.sort_order,
 			updated_at      = CURRENT_TIMESTAMP
 	`, n.Name, n.Region, n.Address, n.Port, n.Protocol, n.ConfigJSON, oc,
-		nullStr(n.BrokerEndpoint), nullStr(n.BrokerShortID), boolToInt(n.HasBroker),
+		nullStr(n.BrokerEndpoint), nullStr(n.BrokerShortID), boolToInt(n.HasBroker), boolToInt(n.BrokerEnabled),
 		boolToInt(n.IsEnabled), n.SortOrder)
 	return err
 }
@@ -116,7 +118,7 @@ func (r *NodeRepo) DeleteMissing(ctx context.Context, keepNames []string) (int64
 // kept in one place so Get / GetByName / List stay in sync.
 const nodeSelectColumns = `
 	id, name, region, address, port, protocol, config_json, outbound_config,
-	broker_endpoint, broker_short_id, has_broker,
+	broker_endpoint, broker_short_id, has_broker, broker_enabled,
 	is_enabled, sort_order, updated_at
 `
 
@@ -162,11 +164,11 @@ func (r *NodeRepo) List(ctx context.Context, onlyEnabled bool) ([]*Node, error) 
 
 func scanNode(s scanner) (*Node, error) {
 	var n Node
-	var enabled, hasBroker int
+	var enabled, hasBroker, brokerEnabled int
 	var brokerEndpoint, brokerShortID sql.NullString
 	err := s.Scan(&n.ID, &n.Name, &n.Region, &n.Address, &n.Port, &n.Protocol,
 		&n.ConfigJSON, &n.OutboundConfig,
-		&brokerEndpoint, &brokerShortID, &hasBroker,
+		&brokerEndpoint, &brokerShortID, &hasBroker, &brokerEnabled,
 		&enabled, &n.SortOrder, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -176,6 +178,7 @@ func scanNode(s scanner) (*Node, error) {
 	}
 	n.IsEnabled = enabled != 0
 	n.HasBroker = hasBroker != 0
+	n.BrokerEnabled = brokerEnabled != 0
 	if brokerEndpoint.Valid {
 		s := brokerEndpoint.String
 		n.BrokerEndpoint = &s
@@ -212,4 +215,29 @@ func nullStr(p *string) any {
 		return nil
 	}
 	return *p
+}
+
+// SetBrokerEnabled toggles the broker_enabled flag for a node by ID.
+// Returns ErrNotFound if the node doesn't exist.
+//
+// Phase 3 Batch 3.3 G4-1c-3g: lets admin temporarily disable a node's
+// broker without removing the node row.
+func (r *NodeRepo) SetBrokerEnabled(ctx context.Context, id int64, enabled bool) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE nodes
+		   SET broker_enabled = ?,
+		       updated_at     = CURRENT_TIMESTAMP
+		 WHERE id = ?
+	`, boolToInt(enabled), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

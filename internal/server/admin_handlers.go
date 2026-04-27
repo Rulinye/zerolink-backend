@@ -18,6 +18,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -431,17 +432,61 @@ func (s *Server) handleAdminListNodes(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, len(nodes))
 	for i, n := range nodes {
 		out[i] = map[string]any{
-			"id":          n.ID,
-			"name":        n.Name,
-			"region":      n.Region,
-			"address":     n.Address,
-			"port":        n.Port,
-			"protocol":    n.Protocol,
-			"config_json": n.ConfigJSON,
-			"is_enabled":  n.IsEnabled,
-			"sort_order":  n.SortOrder,
-			"updated_at":  n.UpdatedAt.Format(time.RFC3339),
+			"id":              n.ID,
+			"name":            n.Name,
+			"region":          n.Region,
+			"address":         n.Address,
+			"port":            n.Port,
+			"protocol":        n.Protocol,
+			"config_json":     n.ConfigJSON,
+			"is_enabled":      n.IsEnabled,
+			"sort_order":      n.SortOrder,
+			"updated_at":      n.UpdatedAt.Format(time.RFC3339),
+			"broker_endpoint": n.BrokerEndpoint,
+			"broker_short_id": n.BrokerShortID,
+			"has_broker":      n.HasBroker,
+			"broker_enabled":  n.BrokerEnabled,
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": out})
+}
+
+// --- PATCH /api/v1/admin/nodes/{id}/broker (G4-1c-3g) ---
+//
+// Toggle the broker_enabled flag for a node. Only meaningful when the
+// node also has has_broker=1; if has_broker=0, the toggle is a no-op
+// from the client's perspective (the broker fields are hidden either
+// way).
+//
+// Request body: { "enabled": bool }
+// Response: { "ok": true, "broker_enabled": bool }
+func (s *Server) handleAdminToggleBroker(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid node id")
+		return
+	}
+
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+
+	if err := s.db.Nodes.SetBrokerEnabled(r.Context(), id, body.Enabled); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "node not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":             true,
+		"broker_enabled": body.Enabled,
+	})
 }

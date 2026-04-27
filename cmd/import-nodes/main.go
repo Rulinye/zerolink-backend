@@ -45,6 +45,14 @@ type entry struct {
 	BrokerEndpoint *string `json:"broker_endpoint,omitempty"`
 	BrokerShortID  *string `json:"broker_short_id,omitempty"`
 	HasBroker      bool    `json:"has_broker,omitempty"`
+
+	// Batch 3.3 G4-1c-3g: per-node broker_enabled toggle. Nullable
+	// pointer so we can distinguish "inventory said nothing" (nil,
+	// follow HasBroker) from "inventory said false" (explicit
+	// disable). When nil, defaults to HasBroker — i.e. having a
+	// broker daemon implies advertising it unless explicitly
+	// disabled.
+	BrokerEnabled *bool `json:"broker_enabled,omitempty"`
 }
 
 func main() {
@@ -155,6 +163,7 @@ func main() {
 			BrokerEndpoint: e.BrokerEndpoint,
 			BrokerShortID:  e.BrokerShortID,
 			HasBroker:      e.HasBroker,
+			BrokerEnabled:  resolveBrokerEnabled(e.BrokerEnabled, e.HasBroker),
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "upsert %s: %v\n", e.Name, err)
@@ -208,4 +217,17 @@ func versionString() string {
 		}
 	}
 	return "dev"
+}
+
+// resolveBrokerEnabled determines the broker_enabled flag from the
+// inventory's optional override and the physical has_broker capability.
+// Inventory absent (nil) -> follow has_broker (i.e. having a broker
+// implies advertising it). Inventory explicit -> use the explicit
+// value. This keeps existing inventories that pre-date G4-1c-3g
+// working without breakage.
+func resolveBrokerEnabled(override *bool, hasBroker bool) bool {
+	if override != nil {
+		return *override
+	}
+	return hasBroker
 }

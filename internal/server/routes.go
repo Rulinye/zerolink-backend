@@ -85,6 +85,7 @@ func (s *Server) buildRouter() chi.Router {
 
 				// Nodes.
 				r.Get("/admin/nodes", s.handleAdminListNodes)
+				r.Patch("/admin/nodes/{id}/broker", s.handleAdminToggleBroker)
 			})
 		})
 	})

@@ -44,13 +44,25 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]nodeView, len(nodes))
 	for i, n := range nodes {
+		// broker_enabled (G4-1c-3g) gates whether the node advertises
+		// its broker capability to clients. has_broker is the physical
+		// flag (does this node have a broker daemon configured at all);
+		// broker_enabled is the operational flag (is the admin allowing
+		// it to be picked right now). The user only sees a usable broker
+		// when both are true.
+		showBroker := n.HasBroker && n.BrokerEnabled
+		var brokerEndpoint, brokerShortID *string
+		if showBroker {
+			brokerEndpoint = n.BrokerEndpoint
+			brokerShortID = n.BrokerShortID
+		}
 		out[i] = nodeView{
 			ID: n.ID, Name: n.Name, Region: n.Region,
 			Address: n.Address, Port: n.Port, Protocol: n.Protocol,
 
-			BrokerEndpoint: n.BrokerEndpoint,
-			BrokerShortID:  n.BrokerShortID,
-			HasBroker:      n.HasBroker,
+			BrokerEndpoint: brokerEndpoint,
+			BrokerShortID:  brokerShortID,
+			HasBroker:      showBroker,
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": out})
