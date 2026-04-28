@@ -61,7 +61,7 @@
 
 use anyhow::{anyhow, Context};
 use bytes::{Buf, BufMut, BytesMut};
-use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
+use quinn::{Connection, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -69,6 +69,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use super::cert::DatapathCert;
+use super::obfs::{ObfsConfig, ObfsSocket};
 use super::path_map::{PathEntry, PathMap};
 use crate::ws::session::SessionStore;
 
@@ -119,9 +120,22 @@ pub fn start(
     listen: SocketAddr,
     cert: &DatapathCert,
     sessions: SessionStore,
+    obfs: ObfsConfig,
 ) -> anyhow::Result<DatapathServer> {
     let config = make_server_config(cert)?;
-    let endpoint = Endpoint::server(config, listen).context("quinn endpoint bind")?;
+    // D4.2 Phase 4.1: wrap the UDP socket with the salamander-style XOR
+    // obfuscator. quinn talks to the wrapper as if it were a regular
+    // socket; per-packet XOR happens transparently below quinn.
+    let obfs_socket = ObfsSocket::bind(listen, obfs).context("bind obfs UDP socket")?;
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| anyhow!("no quinn runtime (need tokio)"))?;
+    let endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        Some(config),
+        Arc::new(obfs_socket),
+        runtime,
+    )
+    .context("quinn endpoint with obfs socket")?;
     let paths = PathMap::new();
 
     let acc_paths = paths.clone();

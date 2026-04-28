@@ -13,6 +13,12 @@
 //!   ZL_BROKER_SHORT_ID               — 2-3 char globally-unique label
 //!                                      (e.g. "KR", "GZ"). Used as the
 //!                                      prefix in room codes ("KR-XK7P9R").
+//!   ZL_BROKER_OBFS_PASSWORD          — preshared salamander-style XOR
+//!                                      password for the QUIC datapath.
+//!                                      D4.2 Phase 4.1. Any bytes;
+//!                                      base64 by convention. Must match
+//!                                      the value baked into the client
+//!                                      app at compile time.
 //!
 //! Optional vars (defaults shown):
 //!   ZL_BROKER_LISTEN_HTTP=0.0.0.0:7842        — signaling HTTP listener
@@ -46,6 +52,11 @@ pub struct Config {
     pub verify_cache_ttl: Duration,
     pub request_timeout: Duration,
     pub log_json: bool,
+    /// Preshared password for the QUIC datapath salamander-XOR
+    /// obfuscation (D4.2 Phase 4.1). Required; no default. Stored as
+    /// raw bytes — typically base64 in the env var, decoded by the
+    /// caller. Must be non-empty.
+    pub obfs_password: Vec<u8>,
 }
 
 impl Config {
@@ -82,6 +93,15 @@ impl Config {
 
         let log_json = env_bool("ZL_BROKER_LOG_JSON", true);
 
+        let obfs_password = env::var("ZL_BROKER_OBFS_PASSWORD").context(
+            "ZL_BROKER_OBFS_PASSWORD is required (D4.2: preshared XOR \
+             password for QUIC datapath obfuscation; must match the \
+             value compiled into the client app)",
+        )?;
+        if obfs_password.is_empty() {
+            return Err(anyhow!("ZL_BROKER_OBFS_PASSWORD is empty"));
+        }
+
         Ok(Config {
             listen_http,
             listen_quic,
@@ -94,6 +114,7 @@ impl Config {
             verify_cache_ttl,
             request_timeout,
             log_json,
+            obfs_password: obfs_password.into_bytes(),
         })
     }
 }

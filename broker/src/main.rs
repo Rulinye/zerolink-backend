@@ -15,7 +15,7 @@ use tokio::signal;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-use crate::datapath::{generate_cert, start_server, DatapathInfo};
+use crate::datapath::{generate_cert, start_server, DatapathInfo, ObfsConfig};
 use crate::http::AppState;
 use crate::storage::members::MemberRepo;
 use crate::storage::rooms::RoomRepo;
@@ -77,7 +77,11 @@ async fn main() -> anyhow::Result<()> {
     let sessions = SessionStore::new();
     let broadcast = BroadcastHub::new();
 
-    let dp_server = start_server(dp_listen, &dp_cert, sessions.clone())
+    // D4.2 Phase 4.1: salamander-XOR obfuscation wrapping the QUIC UDP
+    // socket. Password sourced from ZL_BROKER_OBFS_PASSWORD; same value
+    // is compiled into the client.
+    let obfs = ObfsConfig::new(cfg.obfs_password.clone());
+    let dp_server = start_server(dp_listen, &dp_cert, sessions.clone(), obfs)
         .context("datapath quinn server start")?;
     let datapath_paths = dp_server.paths.clone();
     info!(

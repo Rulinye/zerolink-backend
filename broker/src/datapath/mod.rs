@@ -5,10 +5,12 @@
 //! `path_map.rs` for the routing table.
 
 pub mod cert;
+pub mod obfs;
 pub mod path_map;
 pub mod server;
 
 pub use cert::generate as generate_cert;
+pub use obfs::ObfsConfig;
 pub use path_map::PathMap;
 pub use server::start as start_server;
 
