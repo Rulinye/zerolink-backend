@@ -80,6 +80,12 @@ const REASON_SESSION_IN_GRACE: u8 = 0x02;
 const REASON_NOT_IN_ROOM: u8 = 0x03;
 const REASON_PROTOCOL_ERROR: u8 = 0x04;
 
+/// D4.4: reserved `dst_user_id` value signalling "fan out to every
+/// other room member". Broker-allocated user_ids start at 1 and never
+/// approach `u16::MAX`, so this value is unambiguously distinguishable
+/// from any real recipient.
+const BROADCAST_USER_ID: u16 = 0xFFFF;
+
 /// Control-stream message kinds the broker pushes to the client AFTER
 /// the bind handshake. All length-prefixed via 1-byte tag + N bytes.
 const CTRL_PEER_ADDED: u8 = 0x10;
@@ -415,37 +421,64 @@ async fn forward_loop(entry: Arc<PathEntry>, paths: PathMap) -> anyhow::Result<(
         entry.add_in(datagram.len() as u64);
 
         let mut cursor = datagram.clone();
-        let dst_user_id = cursor.get_u16() as i64;
-
-        // Look up destination in the same room.
-        let dest = match paths.get(entry.room_id, dst_user_id).await {
-            Some(d) => d,
-            None => continue, // peer offline; drop
-        };
-        if dest.user_id == entry.user_id {
-            continue; // sending to self; drop
-        }
+        let dst_user_id_u16 = cursor.get_u16();
+        let dst_user_id = dst_user_id_u16 as i64;
 
         // Rewrite header: replace dst with src (this client's user_id).
+        // Same rewrite for unicast and D4.4 broadcast — receivers
+        // always see `[u16 BE src_user_id][payload]`.
         let payload_len = datagram.len() - 2;
         let mut out = BytesMut::with_capacity(2 + payload_len);
         out.put_u16(clamp_user_id(entry.user_id));
         out.extend_from_slice(&cursor[..payload_len]);
-
         let out_bytes = out.freeze();
         let out_len = out_bytes.len() as u64;
-        match dest.conn.send_datagram(out_bytes) {
-            Ok(()) => {
-                dest.add_out(out_len);
+
+        if dst_user_id_u16 == BROADCAST_USER_ID {
+            // D4.4 fan-out: send to every room member except the
+            // sender. Read-lock the path map once (list_room_excluding)
+            // and re-use the rewritten Bytes (Arc-counted clone).
+            let recipients = paths
+                .list_room_excluding(entry.room_id, entry.user_id)
+                .await;
+            for dest in &recipients {
+                match dest.conn.send_datagram(out_bytes.clone()) {
+                    Ok(()) => {
+                        dest.add_out(out_len);
+                    }
+                    Err(e) => {
+                        debug!(
+                            target: "datapath",
+                            err = %e,
+                            src_user_id = entry.user_id,
+                            recipient_user_id = dest.user_id,
+                            "fan-out send_datagram failed (recipient unhealthy)"
+                        );
+                    }
+                }
             }
-            Err(e) => {
-                debug!(
-                    target: "datapath",
-                    err = %e,
-                    src_user_id = entry.user_id,
-                    dst_user_id,
-                    "send_datagram failed (peer connection unhealthy)"
-                );
+        } else {
+            // Unicast: look up the specific destination in the same room.
+            let dest = match paths.get(entry.room_id, dst_user_id).await {
+                Some(d) => d,
+                None => continue, // peer offline; drop
+            };
+            if dest.user_id == entry.user_id {
+                continue; // sending to self; drop
+            }
+            match dest.conn.send_datagram(out_bytes) {
+                Ok(()) => {
+                    dest.add_out(out_len);
+                }
+                Err(e) => {
+                    debug!(
+                        target: "datapath",
+                        err = %e,
+                        src_user_id = entry.user_id,
+                        dst_user_id,
+                        "send_datagram failed (peer connection unhealthy)"
+                    );
+                }
             }
         }
     }

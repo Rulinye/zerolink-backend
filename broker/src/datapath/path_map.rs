@@ -95,6 +95,25 @@ impl PathMap {
             .collect()
     }
 
+    /// All room entries EXCEPT the one with `exclude_user_id`. Used by
+    /// the D4.4 broadcast fan-out path: when a sender targets
+    /// `dst_user_id = BROADCAST_USER_ID` we forward to every other
+    /// member, skipping the sender (loop prevention).
+    ///
+    /// Same shape as `list_room` — read-lock + filter + Arc-clone. Cost
+    /// is one extra equality check per entry over `list_room`.
+    pub async fn list_room_excluding(
+        &self,
+        room_id: i64,
+        exclude_user_id: i64,
+    ) -> Vec<Arc<PathEntry>> {
+        let map = self.inner.read().await;
+        map.iter()
+            .filter(|((rid, uid), _)| *rid == room_id && *uid != exclude_user_id)
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
     /// Drop all paths for a room. Called from admin_destroy_room and
     /// the room-grace watchdog. Each entry has its connection
     /// closed; caller does not need to send room_destroyed over QUIC
