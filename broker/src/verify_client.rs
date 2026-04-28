@@ -124,10 +124,19 @@ impl VerifyClient {
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
 
+        // Phase 4.1 D4.3 (2026-04-28): broker_backend_url is HTTP not
+        // HTTPS now (loopback to chuncheon backend OR loopback to gz
+        // sing-box forwarder which tunnels through reality to chuncheon).
+        // The historical `https_only(true)` rejected http:// at request
+        // time as "builder error", so we drop it. The TLS config above
+        // is dead code on http:// requests but harmless; FingerprintVerifier
+        // construction also stays for the validate_fingerprint format
+        // check at startup. A future cleanup batch can simplify this
+        // entire client to a plain reqwest::Client::new() once all
+        // brokers have migrated.
         let http = Client::builder()
             .use_preconfigured_tls(tls_config)
             .timeout(request_timeout)
-            .https_only(true) // backend URL must be HTTPS — fail early on misconfiguration
             .build()
             .context("build reqwest client")?;
 
