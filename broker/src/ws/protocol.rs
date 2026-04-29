@@ -18,10 +18,15 @@
 //!
 //! `event` names:
 //!
-//!   member_joined    {room_id, user_id, username, joined_at, public_endpoint:null}
-//!   member_left      {room_id, user_id, username}
-//!   room_destroyed   {room_id, reason: "owner_destroy"|"grace_expired"}
-//!   p2p_candidate    Phase 4.1 placeholder; never emitted in 3.3.
+//!   member_joined            {room_id, user_id, username, joined_at, public_endpoint:null}
+//!   member_left              {room_id, user_id, username}
+//!   room_destroyed           {room_id, reason: "owner_destroy"|"grace_expired"}
+//!   peer_candidates_updated  {user_id, candidates, fingerprint_sha256}    -- D4.5 (Phase 4.4)
+//!
+//! `req` methods added in batch 4.4 (D4.5):
+//!
+//!   signal_publish_candidates {candidates: [...], fingerprint_sha256: "..."} → {ok: true}
+//!   signal_get_candidates     {user_id}                                      → {candidates: [...], fingerprint_sha256: null}
 
 use serde::{Deserialize, Serialize};
 
@@ -144,6 +149,58 @@ pub struct ResumeSessionParams {
 #[derive(Debug, Deserialize)]
 pub struct AdminDestroyRoomParams {
     pub room_id: i64,
+}
+
+// --- D4.5 (Phase 4.4) P2P signaling — candidate exchange ---------------------
+
+/// One ICE-style candidate. `kind` is "host" (LAN-enumerated address)
+/// or "srflx" (server-reflexive — i.e. the broker-observed
+/// post-NAT 4-tuple from CTRL_OBSERVED_ENDPOINT 0x12). We do NOT
+/// enumerate "relay" or "prflx" — broker IS the relay (D3.32),
+/// peer-reflexive is implicit. See D4.5 for the simplified
+/// candidate model.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Candidate {
+    pub ip: String,
+    pub port: u16,
+    pub kind: String,
+}
+
+/// Params for signal_publish_candidates. The fingerprint is the
+/// SHA-256 hex of the publishing peer's self-signed datapath cert
+/// (D4.6); peers receiving the matching `peer_candidates_updated`
+/// event use this fingerprint to authenticate the QUIC handshake
+/// on the punched socket.
+#[derive(Debug, Deserialize)]
+pub struct SignalPublishCandidatesParams {
+    #[serde(default)]
+    pub candidates: Vec<Candidate>,
+    pub fingerprint_sha256: String,
+}
+
+/// Params for signal_get_candidates. Race-recovery pull: a peer
+/// who joined after another peer's broadcast can fetch the
+/// last-published candidate set. fingerprint is NOT persisted
+/// today (it's a per-process value) — best-effort recovery
+/// returns `fingerprint_sha256: null` and the caller waits for
+/// the live broadcast on the publisher's next reconnect.
+#[derive(Debug, Deserialize)]
+pub struct SignalGetCandidatesParams {
+    pub user_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SignalGetCandidatesResult {
+    pub candidates: Vec<Candidate>,
+    /// Always `None` in batch 4.4. See doc-comment on params.
+    pub fingerprint_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerCandidatesUpdatedEvent {
+    pub user_id: i64,
+    pub candidates: Vec<Candidate>,
+    pub fingerprint_sha256: String,
 }
 
 // ----- per-method result shapes -----
@@ -295,6 +352,8 @@ pub enum RoomEvent {
     MemberJoined(MemberJoinedEvent),
     MemberLeft(MemberLeftEvent),
     RoomDestroyed(RoomDestroyedEvent),
+    /// D4.5 (Phase 4.4): a room peer published an updated candidate set.
+    PeerCandidatesUpdated(PeerCandidatesUpdatedEvent),
 }
 
 impl RoomEvent {
@@ -311,6 +370,10 @@ impl RoomEvent {
             RoomEvent::RoomDestroyed(e) => EventEnvelope {
                 name: "room_destroyed".to_string(),
                 data: serde_json::to_value(e).expect("RoomDestroyedEvent serializable"),
+            },
+            RoomEvent::PeerCandidatesUpdated(e) => EventEnvelope {
+                name: "peer_candidates_updated".to_string(),
+                data: serde_json::to_value(e).expect("PeerCandidatesUpdatedEvent serializable"),
             },
         }
     }

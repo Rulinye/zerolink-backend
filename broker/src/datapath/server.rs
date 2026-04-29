@@ -90,6 +90,13 @@ const BROADCAST_USER_ID: u16 = 0xFFFF;
 /// the bind handshake. All length-prefixed via 1-byte tag + N bytes.
 const CTRL_PEER_ADDED: u8 = 0x10;
 const CTRL_PEER_REMOVED: u8 = 0x11;
+/// D4.5 (Phase 4.4): broker-as-STUN reflector. Emitted exactly once
+/// per connection, immediately after the bind OK reply, carrying
+/// the post-NAT 4-tuple this client appears to have on the wire
+/// (i.e. `Connection::remote_address()`). Wire shape after the tag:
+///
+///     [u8 family (4 | 6)] [4|16 bytes addr] [u16 BE port]
+const CTRL_OBSERVED_ENDPOINT: u8 = 0x12;
 
 /// Build the quinn ServerConfig for our self-signed datapath cert.
 fn make_server_config(cert: &DatapathCert) -> anyhow::Result<ServerConfig> {
@@ -235,6 +242,10 @@ async fn handle_connection(
 
     // Step 4: write bind OK + peer list to ourselves on the control
     // stream (we still own the SendStream via the entry's mutex).
+    // Immediately after, emit CTRL_OBSERVED_ENDPOINT (D4.5) carrying
+    // the post-NAT 4-tuple we observe for this client. This is the
+    // broker-as-STUN-reflector primitive that lets the peer discover
+    // its srflx candidate without a separate STUN server.
     {
         let mut s = entry.control_send.lock().await;
         if let Err(e) = write_bind_ok(&mut s, user_id, &existing).await {
@@ -242,6 +253,18 @@ async fn handle_connection(
             paths.remove(room_id, user_id).await;
             conn.close(quinn::VarInt::from_u32(0x43), b"bind_ok_write_failed");
             return Err(e);
+        }
+        // D4.5: emit observed endpoint. Best-effort: an emit failure
+        // here means this client never learned its srflx, but the
+        // datapath itself is fine — broker-relay still works, and
+        // the peer can still gather host candidates locally.
+        if let Err(e) = write_observed_endpoint(&mut s, remote).await {
+            debug!(
+                target: "datapath",
+                %remote,
+                err = %e,
+                "observed endpoint emit failed (non-fatal)"
+            );
         }
     }
 
@@ -365,6 +388,29 @@ async fn write_ctrl_peer_event(send: &mut SendStream, tag: u8, user_id: i64) -> 
     buf.put_u8(tag);
     buf.put_u16(clamp_user_id(user_id));
     send.write_all(&buf).await.context("write ctrl event")?;
+    Ok(())
+}
+
+/// D4.5: write `[0x12 CTRL_OBSERVED_ENDPOINT][u8 family][addr][u16 BE port]`.
+/// Family 4 ⇒ 1 + 4 + 2 = 7 body bytes after tag. Family 6 ⇒ 1 + 16 + 2 = 19.
+async fn write_observed_endpoint(send: &mut SendStream, addr: SocketAddr) -> anyhow::Result<()> {
+    let mut buf = BytesMut::with_capacity(1 + 1 + 16 + 2);
+    buf.put_u8(CTRL_OBSERVED_ENDPOINT);
+    match addr {
+        SocketAddr::V4(v4) => {
+            buf.put_u8(4);
+            buf.put_slice(&v4.ip().octets());
+            buf.put_u16(v4.port());
+        }
+        SocketAddr::V6(v6) => {
+            buf.put_u8(6);
+            buf.put_slice(&v6.ip().octets());
+            buf.put_u16(v6.port());
+        }
+    }
+    send.write_all(&buf)
+        .await
+        .context("write observed endpoint")?;
     Ok(())
 }
 

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_endpoint FROM members WHERE room_id = ? AND user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_endpoint",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "73ff7da86010324d7133aae29e05313310aecc55a3d507d4c9494c1835631abb"
+}

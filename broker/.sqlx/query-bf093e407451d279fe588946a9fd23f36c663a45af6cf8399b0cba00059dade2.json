@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE members SET public_endpoint = ? WHERE room_id = ? AND user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "bf093e407451d279fe588946a9fd23f36c663a45af6cf8399b0cba00059dade2"
+}

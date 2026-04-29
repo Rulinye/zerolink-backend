@@ -140,4 +140,48 @@ impl MemberRepo {
         .await?;
         Ok(row.n)
     }
+
+    /// D4.5 (P2P signaling): write a member's NAT-reflected /
+    /// host-enumerated candidate set as a JSON blob into
+    /// `members.public_endpoint`. The column is TEXT in the schema
+    /// (broker/migrations/0001_initial.sql:119, "Phase 4.1 stub")
+    /// and we serialize `Vec<Candidate>` to JSON at the call site.
+    /// Returns true if a row was updated, false if the (room_id,
+    /// user_id) pair has no member row (caller decides whether
+    /// that's an error or a benign race).
+    pub async fn update_public_endpoint(
+        &self,
+        room_id: i64,
+        user_id: i64,
+        value: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query!(
+            "UPDATE members SET public_endpoint = ? WHERE room_id = ? AND user_id = ?",
+            value,
+            room_id,
+            user_id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// D4.5: fetch a single member's `public_endpoint` JSON blob.
+    /// Returns `Ok(None)` when the member row exists but has never
+    /// been published, AND when the member row doesn't exist —
+    /// callers shouldn't distinguish (race recovery is best-effort).
+    pub async fn get_public_endpoint(
+        &self,
+        room_id: i64,
+        user_id: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query!(
+            "SELECT public_endpoint FROM members WHERE room_id = ? AND user_id = ?",
+            room_id,
+            user_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| r.public_endpoint))
+    }
 }

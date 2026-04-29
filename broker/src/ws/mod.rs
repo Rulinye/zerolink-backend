@@ -227,6 +227,8 @@ fn event_targets_self(evt: &RoomEvent, self_user_id: i64) -> bool {
         RoomEvent::MemberJoined(e) => e.user_id == self_user_id,
         RoomEvent::MemberLeft(e) => e.user_id == self_user_id,
         RoomEvent::RoomDestroyed(_) => false, // everyone needs this
+        // D4.5: don't echo our own candidate publish back to ourselves.
+        RoomEvent::PeerCandidatesUpdated(e) => e.user_id == self_user_id,
     }
 }
 
@@ -289,6 +291,25 @@ async fn handle_client_text(
                 "admin_list_all_rooms" => handlers::handle_admin_list_all_rooms(state, auth).await,
                 "admin_destroy_room" => {
                     handlers::handle_admin_destroy_room(state, auth, req.params).await
+                }
+                // D4.5 (Phase 4.4) — P2P signaling.
+                "signal_publish_candidates" => {
+                    handlers::handle_signal_publish_candidates(
+                        state,
+                        auth,
+                        req.params,
+                        in_room_pair.clone(),
+                    )
+                    .await
+                }
+                "signal_get_candidates" => {
+                    handlers::handle_signal_get_candidates(
+                        state,
+                        auth,
+                        req.params,
+                        in_room_pair.clone(),
+                    )
+                    .await
                 }
                 other => HandlerOutput {
                     result: Err(crate::ws::protocol::RpcError {

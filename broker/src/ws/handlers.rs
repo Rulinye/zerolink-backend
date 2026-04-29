@@ -20,10 +20,13 @@ use tracing::{debug, info, warn};
 use crate::http::AppState;
 use crate::storage::rooms::{RoomError, RoomState};
 use crate::ws::protocol::{
-    AdminDestroyRoomParams, AdminListAllRoomsResult, AdminRoomEntry, CreateRoomParams,
+    AdminDestroyRoomParams, AdminListAllRoomsResult, AdminRoomEntry, Candidate, CreateRoomParams,
     CreateRoomResult, DestroyRoomParams, JoinRoomParams, JoinRoomResult, ListMyRoomsResult,
-    MemberInfo, MemberJoinedEvent, MemberLeftEvent, MyRoomEntry, OkResult, ResumeSessionParams,
-    ResumeSessionResult, RoomDestroyedEvent, RoomEvent, RpcError, RoomInfoParams, RoomInfoResult};
+    MemberInfo, MemberJoinedEvent, MemberLeftEvent, MyRoomEntry, OkResult,
+    PeerCandidatesUpdatedEvent, ResumeSessionParams, ResumeSessionResult, RoomDestroyedEvent,
+    RoomEvent, RoomInfoParams, RoomInfoResult, RpcError, SignalGetCandidatesParams,
+    SignalGetCandidatesResult, SignalPublishCandidatesParams,
+};
 use crate::ws::session::{SessionError, WsBinding};
 
 /// Authenticated context for a connection. Filled in once at WS upgrade
@@ -869,6 +872,161 @@ pub async fn handle_admin_destroy_room(
 
     HandlerOutput {
         result: Ok(serde_json::to_value(OkResult { ok: true }).unwrap()),
+        side_effect: SideEffect::None,
+    }
+}
+
+// =====================================================================
+// signal_publish_candidates (D4.5, Phase 4.4)
+// =====================================================================
+
+/// Persist the caller's candidate set into `members.public_endpoint`
+/// (JSON of `Vec<Candidate>`), then broadcast `peer_candidates_updated`
+/// to room peers. Fingerprint travels in the live event but is NOT
+/// persisted (it's a per-process value; cf. D4.6).
+pub async fn handle_signal_publish_candidates(
+    state: &AppState,
+    auth: &WsAuth,
+    params: Json,
+    in_room: Option<(i64, String)>,
+) -> HandlerOutput {
+    let Some((room_id, _session_id)) = in_room else {
+        return err(
+            "not_in_room",
+            "join or create a room before publishing candidates",
+        );
+    };
+
+    let p: SignalPublishCandidatesParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => {
+            return err(
+                "bad_params",
+                format!("signal_publish_candidates params: {e}"),
+            );
+        }
+    };
+
+    if p.fingerprint_sha256.len() != 64
+        || !p.fingerprint_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return err(
+            "bad_params",
+            "fingerprint_sha256 must be 64 lowercase hex chars (SHA-256)",
+        );
+    }
+
+    let json = match serde_json::to_string(&p.candidates) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(target: "rpc", err = %e, "candidate JSON encode failed");
+            return err("internal", "signal_publish_candidates failed");
+        }
+    };
+
+    let member_repo = crate::storage::members::MemberRepo::new(state.storage.pool.clone());
+    let updated = match member_repo
+        .update_public_endpoint(room_id, auth.user_id, Some(json.as_str()))
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(target: "rpc", err = %e, "members.update_public_endpoint failed");
+            return err("internal", "signal_publish_candidates failed");
+        }
+    };
+    if !updated {
+        // Caller's session says they're in_room, but the row is gone.
+        // This is the rare race where grace_watchdog finalized between
+        // our last successful RPC and now. Surface as not_in_room so
+        // the client knows to rejoin.
+        return err(
+            "not_in_room",
+            "member row missing — session may have been finalized",
+        );
+    }
+
+    let evt = RoomEvent::PeerCandidatesUpdated(PeerCandidatesUpdatedEvent {
+        user_id: auth.user_id,
+        candidates: p.candidates,
+        fingerprint_sha256: p.fingerprint_sha256,
+    });
+    let _ = state.broadcast.send(room_id, evt).await;
+
+    info!(
+        target: "rpc",
+        user_id = auth.user_id,
+        room_id,
+        "candidates published"
+    );
+
+    HandlerOutput {
+        result: Ok(serde_json::to_value(OkResult { ok: true }).unwrap()),
+        side_effect: SideEffect::None,
+    }
+}
+
+// =====================================================================
+// signal_get_candidates (D4.5, Phase 4.4)
+// =====================================================================
+
+/// Best-effort race-recovery pull: a peer who just joined can fetch
+/// the last-published candidate set of any other peer in the SAME
+/// room. Fingerprint is not persisted (always returns None); caller
+/// either waits for the next live broadcast or proceeds without it.
+pub async fn handle_signal_get_candidates(
+    state: &AppState,
+    auth: &WsAuth,
+    params: Json,
+    in_room: Option<(i64, String)>,
+) -> HandlerOutput {
+    let Some((room_id, _session_id)) = in_room else {
+        return err(
+            "not_in_room",
+            "join or create a room before querying candidates",
+        );
+    };
+
+    let p: SignalGetCandidatesParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return err("bad_params", format!("signal_get_candidates params: {e}")),
+    };
+
+    let member_repo = crate::storage::members::MemberRepo::new(state.storage.pool.clone());
+    let raw = match member_repo.get_public_endpoint(room_id, p.user_id).await {
+        Ok(opt) => opt,
+        Err(e) => {
+            warn!(target: "rpc", err = %e, "members.get_public_endpoint failed");
+            return err("internal", "signal_get_candidates failed");
+        }
+    };
+
+    let candidates: Vec<Candidate> = match raw {
+        Some(s) => match serde_json::from_str::<Vec<Candidate>>(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                // Stored value is corrupt; treat as "no candidates"
+                // and log so we notice repeat occurrences.
+                debug!(
+                    target: "rpc",
+                    err = %e,
+                    target_user = p.user_id,
+                    "stored public_endpoint is not Vec<Candidate>; returning empty"
+                );
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+
+    let _ = auth; // same-room enforced by `in_room` capture; auth unused here.
+
+    HandlerOutput {
+        result: Ok(serde_json::to_value(SignalGetCandidatesResult {
+            candidates,
+            fingerprint_sha256: None,
+        })
+        .unwrap()),
         side_effect: SideEffect::None,
     }
 }
