@@ -56,6 +56,13 @@ pub struct Room {
     pub state: RoomState,
     pub grace_until: Option<i64>,
     pub destroyed_at: Option<i64>,
+    /// Phase 4.6 / D4.8 — room overlay type. "l2" or "l3". Default
+    /// "l3" preserves pre-4.6 behaviour. Set at create time;
+    /// immutable thereafter. Joiners inherit via room metadata.
+    /// Clients enforce D3.17's "macOS rejects L2" rule on the
+    /// client side; broker side surfaces the field on every room
+    /// RPC for downstream gating.
+    pub room_type: String,
 }
 
 #[derive(Clone)]
@@ -99,6 +106,7 @@ impl RoomRepo {
         owner_user_id: i64,
         owner_username: &str,
         path_strategy: &str,
+        room_type: &str,
         now: i64,
     ) -> Result<Room, RoomError> {
         for _ in 0..8 {
@@ -110,9 +118,9 @@ impl RoomRepo {
                 INSERT INTO rooms (
                     code, owner_user_id, owner_username,
                     created_at, last_active_at,
-                    path_strategy, supports_p2p, state
+                    path_strategy, supports_p2p, room_type, state
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
                 RETURNING id AS "id!"
                 "#,
                 code,
@@ -122,6 +130,7 @@ impl RoomRepo {
                 now,
                 path_strategy,
                 supports_p2p_int,
+                room_type,
             )
             .fetch_one(&self.pool)
             .await;
@@ -140,6 +149,7 @@ impl RoomRepo {
                         state: RoomState::Active,
                         grace_until: None,
                         destroyed_at: None,
+                        room_type: room_type.to_string(),
                     });
                 }
                 Err(sqlx::Error::Database(db_err)) => {
@@ -169,7 +179,7 @@ impl RoomRepo {
             r#"
             SELECT id AS "id!", code, owner_user_id, owner_username,
                    created_at, last_active_at,
-                   path_strategy, supports_p2p,
+                   path_strategy, supports_p2p, room_type,
                    state, grace_until, destroyed_at
               FROM rooms
              WHERE code = ?
@@ -191,6 +201,7 @@ impl RoomRepo {
             state: RoomState::from_db(&r.state).unwrap_or(RoomState::Active),
             grace_until: r.grace_until,
             destroyed_at: r.destroyed_at,
+            room_type: r.room_type,
         }))
     }
 
@@ -201,7 +212,7 @@ impl RoomRepo {
             r#"
             SELECT id AS "id!", code, owner_user_id, owner_username,
                    created_at, last_active_at,
-                   path_strategy, supports_p2p,
+                   path_strategy, supports_p2p, room_type,
                    state, grace_until, destroyed_at
               FROM rooms
              WHERE id = ?
@@ -222,6 +233,7 @@ impl RoomRepo {
             state: RoomState::from_db(&r.state).unwrap_or(RoomState::Active),
             grace_until: r.grace_until,
             destroyed_at: r.destroyed_at,
+            room_type: r.room_type,
         }))
     }
 
@@ -234,7 +246,7 @@ impl RoomRepo {
             r#"
             SELECT id AS "id!", code, owner_user_id, owner_username,
                    created_at, last_active_at,
-                   path_strategy, supports_p2p,
+                   path_strategy, supports_p2p, room_type,
                    state, grace_until, destroyed_at
               FROM rooms
              WHERE owner_user_id = ?
@@ -259,6 +271,7 @@ impl RoomRepo {
                 state: RoomState::from_db(&r.state).unwrap_or(RoomState::Active),
                 grace_until: r.grace_until,
                 destroyed_at: r.destroyed_at,
+                room_type: r.room_type,
             })
             .collect())
     }
@@ -283,7 +296,7 @@ impl RoomRepo {
             r#"
             SELECT id AS "id!", code, owner_user_id, owner_username,
                    created_at, last_active_at,
-                   path_strategy, supports_p2p,
+                   path_strategy, supports_p2p, room_type,
                    state, grace_until, destroyed_at
               FROM rooms
              WHERE state != 'destroyed'
@@ -316,6 +329,7 @@ impl RoomRepo {
                 state: RoomState::from_db(&r.state).unwrap_or(RoomState::Active),
                 grace_until: r.grace_until,
                 destroyed_at: r.destroyed_at,
+                room_type: r.room_type,
             })
             .collect())
     }
@@ -328,7 +342,7 @@ impl RoomRepo {
             r#"
             SELECT id AS "id!", code, owner_user_id, owner_username,
                    created_at, last_active_at,
-                   path_strategy, supports_p2p,
+                   path_strategy, supports_p2p, room_type,
                    state, grace_until, destroyed_at
               FROM rooms
              WHERE state != 'destroyed'
@@ -351,6 +365,7 @@ impl RoomRepo {
                 state: RoomState::from_db(&r.state).unwrap_or(RoomState::Active),
                 grace_until: r.grace_until,
                 destroyed_at: r.destroyed_at,
+                room_type: r.room_type,
             })
             .collect())
     }

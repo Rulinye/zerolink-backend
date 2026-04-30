@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n            SELECT id AS \"id!\", code, owner_user_id, owner_username,\n                   created_at, last_active_at,\n                   path_strategy, supports_p2p,\n                   state, grace_until, destroyed_at\n              FROM rooms\n             WHERE code = ?\n               AND state != 'destroyed'\n            ",
+  "query": "\n            SELECT id AS \"id!\", code, owner_user_id, owner_username,\n                   created_at, last_active_at,\n                   path_strategy, supports_p2p, room_type,\n                   state, grace_until, destroyed_at\n              FROM rooms\n             WHERE state != 'destroyed'\n               AND (\n                 owner_user_id = ?\n                 OR EXISTS (\n                   SELECT 1 FROM members\n                    WHERE members.room_id = rooms.id\n                      AND members.user_id = ?\n                 )\n               )\n             ORDER BY created_at DESC\n            ",
   "describe": {
     "columns": [
       {
@@ -44,26 +44,32 @@
         "type_info": "Integer"
       },
       {
-        "name": "state",
+        "name": "room_type",
         "ordinal": 8,
         "type_info": "Text"
       },
       {
-        "name": "grace_until",
+        "name": "state",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "grace_until",
+        "ordinal": 10,
         "type_info": "Integer"
       },
       {
         "name": "destroyed_at",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Integer"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       true,
+      false,
       false,
       false,
       false,
@@ -76,5 +82,5 @@
       true
     ]
   },
-  "hash": "cd673922a65ee109c7fa08496adf9cb50a603fd7597e926a24f891c8575b5de1"
+  "hash": "46f9e23904c2047443a8c3783ffffa87c9ab9ae99b2c7d8722216406ee491979"
 }

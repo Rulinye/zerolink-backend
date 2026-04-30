@@ -109,6 +109,12 @@ pub struct CreateRoomParams {
     /// Phase 3.3 always relays regardless of strategy.
     #[serde(default)]
     pub path_strategy: Option<String>,
+    /// Phase 4.6 / D4.8 — room overlay type. "l2" | "l3". Default
+    /// "l3". Set at create time, immutable for room lifetime.
+    /// macOS clients gate join attempts on `room_type='l2'` per
+    /// D3.17 (no silent downgrade).
+    #[serde(default)]
+    pub room_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +223,11 @@ pub struct CreateRoomResult {
     pub quic_endpoint: String,
     /// SHA-256 hex of the broker's QUIC TLS cert. Client pins this.
     pub quic_fingerprint: String,
+    /// Phase 4.6 / D4.8 — overlay type the broker recorded. Echoed
+    /// so the wizard can confirm the wire-level value (when
+    /// CreateRoomParams.room_type is None, broker default "l3"
+    /// applies — UI should reflect that).
+    pub room_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,6 +241,10 @@ pub struct JoinRoomResult {
     pub members: Vec<MemberInfo>,
     pub quic_endpoint: String,
     pub quic_fingerprint: String,
+    /// Phase 4.6 / D4.8 — joiner sees the room type so client can
+    /// route through the L2 helper path or refuse the join (macOS
+    /// + L2 → D3.17 silent-downgrade rule).
+    pub room_type: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -260,6 +275,10 @@ pub struct MyRoomEntry {
     /// joined rooms previously invisible because list_my_rooms
     /// filtered to owned-only). Wire-additive.
     pub is_owner: bool,
+    /// Phase 4.6 / D4.8 — room overlay type. Lets dashboard surface
+    /// "L2 / L3" badge so users know which platform constraints
+    /// apply before re-joining. Wire-additive.
+    pub room_type: String,
 }
 
 /// Public-safe room metadata returned by room_info. Excludes:
@@ -277,6 +296,10 @@ pub struct RoomInfoResult {
     pub member_count: i64,
     pub owner_username: String,
     pub created_at: i64,
+    /// Phase 4.6 / D4.8 — surface room type pre-join so search
+    /// flow can disable the join button on macOS for L2 rooms
+    /// (D3.17 no-silent-downgrade). Wire-additive.
+    pub room_type: String,
 }
 
 /// Per-room entry in the admin view. Includes owner identity and
@@ -309,6 +332,10 @@ pub struct ResumeSessionResult {
     pub members: Vec<MemberInfo>,
     pub quic_endpoint: String,
     pub quic_fingerprint: String,
+    /// Phase 4.6 / D4.8 — resumed sessions surface room type so the
+    /// reattaching client can pick the right helper bridge (L2 vs
+    /// L3) without a separate room_info round-trip.
+    pub room_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -436,6 +463,7 @@ mod tests {
             member_count: 2,
             owner_username: "user_1".into(),
             created_at: 1730000000,
+            room_type: "l3".into(),
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"room_id\":42"));

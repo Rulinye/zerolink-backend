@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                INSERT INTO rooms (\n                    code, owner_user_id, owner_username,\n                    created_at, last_active_at,\n                    path_strategy, supports_p2p, room_type, state\n                )\n                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')\n                RETURNING id AS \"id!\"\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "063a224736a58cc0a4427ab997160a7a0cbe68c4cc8649a1d8b675e76305c93b"
+}

@@ -117,6 +117,16 @@ pub async fn handle_create_room(
         .as_deref()
         .filter(|s| matches!(*s, "auto" | "p2p_only" | "broker_only"))
         .unwrap_or("auto");
+    // Phase 4.6 / D4.8 — clamp room_type to the allowed set; default
+    // "l3" preserves pre-4.6 behaviour. Invalid values become "l3"
+    // rather than erroring (older clients pre-4.6 may not send the
+    // field at all; shape-tolerant default is the wire-additive
+    // contract per the migration's commentary).
+    let room_type = p
+        .room_type
+        .as_deref()
+        .filter(|s| matches!(*s, "l2" | "l3"))
+        .unwrap_or("l3");
 
     let now = Utc::now().timestamp();
 
@@ -124,7 +134,7 @@ pub async fn handle_create_room(
     let member_repo = crate::storage::members::MemberRepo::new(state.storage.pool.clone());
 
     let room = match room_repo
-        .create(auth.user_id, &auth.username, strategy, now)
+        .create(auth.user_id, &auth.username, strategy, room_type, now)
         .await
     {
         Ok(r) => r,
@@ -193,6 +203,7 @@ pub async fn handle_create_room(
         code_display,
         quic_endpoint: state.datapath.endpoint.clone(),
         quic_fingerprint: state.datapath.fingerprint.clone(),
+        room_type: room.room_type,
     })
     .expect("CreateRoomResult serializable");
 
@@ -369,6 +380,7 @@ pub async fn handle_join_room(
         members,
         quic_endpoint: state.datapath.endpoint.clone(),
         quic_fingerprint: state.datapath.fingerprint.clone(),
+        room_type: room.room_type,
     })
     .expect("JoinRoomResult serializable");
 
@@ -588,6 +600,7 @@ pub async fn handle_list_my_rooms(state: &AppState, auth: &WsAuth) -> HandlerOut
             state: r.state.as_str().to_string(),
             member_count: count,
             is_owner,
+            room_type: r.room_type,
         });
     }
 
@@ -684,6 +697,7 @@ pub async fn handle_resume_session(
         members,
         quic_endpoint: state.datapath.endpoint.clone(),
         quic_fingerprint: state.datapath.fingerprint.clone(),
+        room_type: room.room_type,
     })
     .expect("ResumeSessionResult serializable");
 
@@ -709,11 +723,7 @@ pub async fn handle_resume_session(
 /// Anyone authenticated may call this — same trust assumption as
 /// the rest of the broker (a JWT is a "logged-in user" capability).
 /// Phase 4 may layer private-room ACLs on top.
-pub async fn handle_room_info(
-    state: &AppState,
-    _auth: &WsAuth,
-    params: Json,
-) -> HandlerOutput {
+pub async fn handle_room_info(state: &AppState, _auth: &WsAuth, params: Json) -> HandlerOutput {
     let p: RoomInfoParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(e) => return err("bad_params", format!("room_info params: {e}")),
@@ -752,6 +762,7 @@ pub async fn handle_room_info(
         member_count: count,
         owner_username: room.owner_username.clone(),
         created_at: room.created_at,
+        room_type: room.room_type.clone(),
     };
 
     HandlerOutput {
