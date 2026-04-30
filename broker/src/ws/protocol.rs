@@ -254,6 +254,12 @@ pub struct MyRoomEntry {
     pub created_at: i64,
     pub state: String,
     pub member_count: i64,
+    /// True when the auth user is this room's owner; false when the
+    /// auth user is a non-owner member (joined but didn't create).
+    /// Added 2026-04-30 in batch 4.5 to close B4.4-K5 (non-owner
+    /// joined rooms previously invisible because list_my_rooms
+    /// filtered to owned-only). Wire-additive.
+    pub is_owner: bool,
 }
 
 /// Public-safe room metadata returned by room_info. Excludes:

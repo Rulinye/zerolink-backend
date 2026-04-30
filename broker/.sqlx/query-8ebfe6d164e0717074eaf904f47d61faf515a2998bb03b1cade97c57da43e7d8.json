@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT id AS \"id!\", code, owner_user_id, owner_username,\n                   created_at, last_active_at,\n                   path_strategy, supports_p2p,\n                   state, grace_until, destroyed_at\n              FROM rooms\n             WHERE state != 'destroyed'\n               AND (\n                 owner_user_id = ?\n                 OR EXISTS (\n                   SELECT 1 FROM members\n                    WHERE members.room_id = rooms.id\n                      AND members.user_id = ?\n                 )\n               )\n             ORDER BY created_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "code",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "owner_user_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "owner_username",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_active_at",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "path_strategy",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "supports_p2p",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "state",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "grace_until",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "destroyed_at",
+        "ordinal": 10,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "8ebfe6d164e0717074eaf904f47d61faf515a2998bb03b1cade97c57da43e7d8"
+}

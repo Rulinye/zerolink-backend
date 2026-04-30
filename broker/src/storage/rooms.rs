@@ -263,6 +263,63 @@ impl RoomRepo {
             .collect())
     }
 
+    /// List rooms `user_id` is associated with — either as owner OR as
+    /// a member — that are still alive (any state except destroyed).
+    /// Used by the `list_my_rooms` RPC so non-owners can see rooms
+    /// they've joined in the dashboard "我的房间" panel (B4.4-K5
+    /// closeout in batch 4.5).
+    ///
+    /// Caller computes `is_owner` per row via `r.owner_user_id ==
+    /// user_id` (the SQL is intentionally just the union — no
+    /// per-row computed column needed).
+    ///
+    /// EXISTS predicate (rather than LEFT JOIN) keeps the result
+    /// strictly one-row-per-room without dedup concerns; `members`
+    /// has UNIQUE(room_id, user_id) per `0001_initial.sql:123` so
+    /// LEFT JOIN would also yield one row, but EXISTS reads more
+    /// clearly.
+    pub async fn list_alive_for_user(&self, user_id: i64) -> Result<Vec<Room>, sqlx::Error> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id AS "id!", code, owner_user_id, owner_username,
+                   created_at, last_active_at,
+                   path_strategy, supports_p2p,
+                   state, grace_until, destroyed_at
+              FROM rooms
+             WHERE state != 'destroyed'
+               AND (
+                 owner_user_id = ?
+                 OR EXISTS (
+                   SELECT 1 FROM members
+                    WHERE members.room_id = rooms.id
+                      AND members.user_id = ?
+                 )
+               )
+             ORDER BY created_at DESC
+            "#,
+            user_id,
+            user_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Room {
+                id: r.id,
+                code: r.code,
+                owner_user_id: r.owner_user_id,
+                owner_username: r.owner_username,
+                created_at: r.created_at,
+                last_active_at: r.last_active_at,
+                path_strategy: r.path_strategy,
+                supports_p2p: r.supports_p2p != 0,
+                state: RoomState::from_db(&r.state).unwrap_or(RoomState::Active),
+                grace_until: r.grace_until,
+                destroyed_at: r.destroyed_at,
+            })
+            .collect())
+    }
+
     /// List ALL alive rooms (active or empty_grace) across the broker.
     /// For the admin view: `admin_list_all_rooms` RPC. Ordered by
     /// last_active_at DESC so freshly-active rooms surface first.

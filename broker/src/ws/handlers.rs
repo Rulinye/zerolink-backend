@@ -563,10 +563,15 @@ pub async fn handle_list_my_rooms(state: &AppState, auth: &WsAuth) -> HandlerOut
     let room_repo = crate::storage::rooms::RoomRepo::new(state.storage.pool.clone());
     let member_repo = crate::storage::members::MemberRepo::new(state.storage.pool.clone());
 
-    let rooms = match room_repo.list_alive_owned_by(auth.user_id).await {
+    // B4.4-K5 fix (batch 4.5): include rooms the user joined but
+    // doesn't own, in addition to owned rooms. is_owner flag lets the
+    // client UI label / sort. The other call sites of
+    // list_alive_owned_by (room-creation 1-per-user check, etc.) keep
+    // owned-only semantics — those want to enforce ownership limits.
+    let rooms = match room_repo.list_alive_for_user(auth.user_id).await {
         Ok(r) => r,
         Err(e) => {
-            warn!(target: "rpc", err = %e, "list_alive_owned_by failed");
+            warn!(target: "rpc", err = %e, "list_alive_for_user failed");
             return err("internal", "list_my_rooms failed");
         }
     };
@@ -574,6 +579,7 @@ pub async fn handle_list_my_rooms(state: &AppState, auth: &WsAuth) -> HandlerOut
     let mut entries = Vec::with_capacity(rooms.len());
     for r in rooms {
         let count = member_repo.count_in_room(r.id).await.unwrap_or(0);
+        let is_owner = r.owner_user_id == auth.user_id;
         entries.push(MyRoomEntry {
             room_id: r.id,
             code: r.code.clone(),
@@ -581,6 +587,7 @@ pub async fn handle_list_my_rooms(state: &AppState, auth: &WsAuth) -> HandlerOut
             created_at: r.created_at,
             state: r.state.as_str().to_string(),
             member_count: count,
+            is_owner,
         });
     }
 
