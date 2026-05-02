@@ -260,6 +260,49 @@ impl SessionStore {
         Some(rec)
     }
 
+    /// Phase 4.7-K8 (rc9): forcibly remove ALL sessions bound to a
+    /// given room_id. Returns the removed records (for caller-side
+    /// cleanup notifications if any).
+    ///
+    /// Use case: `handle_destroy_room` (owner-triggered) — the
+    /// room is gone, but non-owner members still have SessionStore
+    /// entries pointing at the now-dead room_id. Without this
+    /// sweep, those members can't `create_room` / `join_room` from
+    /// the SAME ws connection until either:
+    ///   (a) their client explicitly issues `leave_room` (which
+    ///       it doesn't on receiving room_destroyed event, only on
+    ///       user-initiated leave), OR
+    ///   (b) their session enters grace + grace_watchdog clears it
+    ///       30s later (only happens if they disconnect their ws),
+    ///       OR
+    ///   (c) the rc9 zombie path drains it 2min later (only if no
+    ///       inbound activity).
+    /// All three are slow / unreliable; explicit broker-side sweep
+    /// at destroy_room time is the right model.
+    pub async fn remove_by_room(&self, room_id: i64) -> Vec<SessionRecord> {
+        let mut inner = self.inner.lock().await;
+        let to_remove: Vec<String> = inner
+            .sessions
+            .iter()
+            .filter(|(_, rec)| rec.room_id == room_id)
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        let mut removed = Vec::with_capacity(to_remove.len());
+        for sid in to_remove {
+            if let Some(rec) = inner.sessions.remove(&sid) {
+                // Keep by_user index in sync — only delete if this is
+                // still the user's primary session.
+                if let Some(ref_sid) = inner.by_user.get(&rec.user_id) {
+                    if ref_sid == &rec.session_id {
+                        inner.by_user.remove(&rec.user_id);
+                    }
+                }
+                removed.push(rec);
+            }
+        }
+        removed
+    }
+
     /// Snapshot of all sessions currently in grace whose deadline has
     /// expired. Returned records have already been removed from the
     /// store. The grace watchdog uses this to fan out the

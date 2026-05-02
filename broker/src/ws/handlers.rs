@@ -540,16 +540,35 @@ pub async fn handle_destroy_room(
 
     state.broadcast.drop_room(room_id).await;
     state.datapath_paths.drop_room(room_id).await;
-    if let Some(sid) = session_id_for_cleanup {
-        // This WS was bound to the room — cleanup the session it knew.
-        state.sessions.remove(&sid).await;
-    } else if let Some(other_sess) = state.sessions.find_by_user(auth.user_id).await {
-        // Owner closed the room remotely (params.room_id path) while
-        // still holding a grace session bound to this room from a
-        // prior ws. Clear it so the user can immediately create a
-        // new room without waiting 30s for the watchdog.
-        if other_sess.room_id == room_id {
-            state.sessions.remove(&other_sess.session_id).await;
+    // Phase 4.7-K8 (rc9): sweep ALL sessions bound to this room.
+    // Pre-K8 only cleared the owner's session (via session_id_for_cleanup
+    // OR find_by_user fallback), leaving non-owner members with stale
+    // SessionStore entries pointing at the now-dead room_id. Those
+    // members would then hit `already_in_room` on their NEXT
+    // create_room/join_room until a zombie cleanup eventually fired.
+    // Explicit per-room sweep is the correct model — destroy_room
+    // is the room's terminal event, every session bound to it is
+    // unambiguously dead.
+    let removed = state.sessions.remove_by_room(room_id).await;
+    if !removed.is_empty() {
+        let count = removed.len();
+        let user_ids: Vec<i64> = removed.iter().map(|r| r.user_id).collect();
+        info!(
+            target: "rpc",
+            room_id,
+            session_count = count,
+            ?user_ids,
+            "destroy_room: cleared all bound sessions"
+        );
+    }
+    // Defensive: if owner was in grace from a prior ws (no
+    // session_id_for_cleanup, no removal above either because grace
+    // session under different room_id?), keep the legacy fallback.
+    if removed.is_empty() && session_id_for_cleanup.is_none() {
+        if let Some(other_sess) = state.sessions.find_by_user(auth.user_id).await {
+            if other_sess.room_id == room_id {
+                state.sessions.remove(&other_sess.session_id).await;
+            }
         }
     }
 
@@ -880,14 +899,22 @@ pub async fn handle_admin_destroy_room(
     state.broadcast.drop_room(p.room_id).await;
     state.datapath_paths.drop_room(p.room_id).await;
 
-    // The owner of the destroyed room may currently have an active
-    // session bound to it — find it via the by_user index and remove
-    // so they can immediately create a new room without bumping into
-    // the partial-unique constraint.
-    if let Some(sess) = state.sessions.find_by_user(room.owner_user_id).await {
-        if sess.room_id == p.room_id {
-            state.sessions.remove(&sess.session_id).await;
-        }
+    // Phase 4.7-K8 (rc9): sweep ALL sessions bound to this room
+    // (mirror of handle_destroy_room — same gap if non-owner members
+    // are bound). Same blast radius as the broadcast event,
+    // semantically correct: the room is dead, every session bound to
+    // it is dead.
+    let removed = state.sessions.remove_by_room(p.room_id).await;
+    if !removed.is_empty() {
+        let count = removed.len();
+        let user_ids: Vec<i64> = removed.iter().map(|r| r.user_id).collect();
+        info!(
+            target: "rpc",
+            room_id = p.room_id,
+            session_count = count,
+            ?user_ids,
+            "admin_destroy_room: cleared all bound sessions"
+        );
     }
 
     info!(
