@@ -90,6 +90,14 @@ pub async fn ws_upgrade(
         user_id: resp.user_id.unwrap_or(0),
         username: resp.username.unwrap_or_default(),
         is_admin: resp.is_admin.unwrap_or(false),
+        // B4.7-supp / B9: rate_limit defaults to 20 Mbps (matches
+        // backend migration 0007 default). 0 from backend would mean
+        // "unlimited" — translate negative/missing to the default to
+        // be safe against schema rollback or older backend.
+        rate_limit_bps: match resp.room_rate_limit_bps {
+            Some(bps) if bps > 0 => bps as u64,
+            _ => 2_500_000, // 20 Mbps fallback
+        },
     };
     if auth.user_id == 0 || auth.username.is_empty() {
         warn!(target: "ws", "verify response missing user_id/username");

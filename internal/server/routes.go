@@ -52,6 +52,10 @@ func (s *Server) buildRouter() chi.Router {
 			// broker_enabled flips to false (defense in depth alongside
 			// client-side filtering of has_broker=false from /api/v1/nodes).
 			r.Get("/broker-status", s.handleBrokerStatus)
+			// B4.7-supp / B3 (room half) / B9: brokers POST per-user
+			// traffic deltas every 60s. Backend bumps users.used_bytes_room
+			// (main half stays Phase 5 until per-user UUID lands).
+			r.Post("/usage/report", s.handleUsageReport)
 		})
 
 		// Authenticated (user).
@@ -81,6 +85,9 @@ func (s *Server) buildRouter() chi.Router {
 				r.Post("/admin/users/{id}/quota", s.handleAdminSetUserQuota)
 				r.Post("/admin/users/{id}/password", s.handleAdminSetUserPassword)
 				r.Delete("/admin/users/{id}", s.handleAdminDeleteUser)
+				// B4.7-supp / B9: per-user broker datapath rate limit.
+				// Body: { "bps": int }. 0 < bps < MAIN_RATE_LIMIT_CEILING_BPS.
+				r.Patch("/admin/users/{id}/rate-limit", s.handleAdminSetUserRateLimit)
 
 				// Invites.
 				r.Get("/admin/invites", s.handleAdminListInvites)
@@ -91,6 +98,12 @@ func (s *Server) buildRouter() chi.Router {
 				// Nodes.
 				r.Get("/admin/nodes", s.handleAdminListNodes)
 				r.Patch("/admin/nodes/{id}/broker", s.handleAdminToggleBroker)
+
+				// B4.7-supp / B3+B9 admin half: traffic audit per user.
+				// Returns current-period totals (used_main + used_room +
+				// quota + room_rate_limit_bps) for all users so the
+				// admin "流量审计" page can surface who's near cap.
+				r.Get("/admin/usage/audit", s.handleAdminUsageAudit)
 			})
 		})
 	})

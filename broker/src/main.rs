@@ -5,6 +5,7 @@ mod config;
 mod datapath;
 mod http;
 mod storage;
+mod usage_reporter;
 mod verify_client;
 mod ws;
 
@@ -119,6 +120,22 @@ async fn main() -> anyhow::Result<()> {
         .await;
     });
 
+    // B4.7-supp / B3 (room half): broker traffic reporter. Drains
+    // PathEntry byte counters every 60s and POSTs aggregated deltas
+    // to /api/v1/usage/report so backend can update
+    // users.used_bytes_room. On POST failure, deltas are retained
+    // locally in the reporter and retried on the next tick.
+    let ur_http = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .build()
+        .context("build usage_reporter http client")?;
+    let ur_paths = datapath_paths.clone();
+    let ur_backend_url = cfg.backend_url.clone();
+    let ur_service_token = cfg.service_token.clone();
+    let ur_task = tokio::spawn(async move {
+        usage_reporter::run_reporter(ur_paths, ur_http, ur_backend_url, ur_service_token).await;
+    });
+
     let state = AppState {
         config: Arc::new(cfg.clone()),
         verify: verify.clone(),
@@ -162,9 +179,11 @@ async fn main() -> anyhow::Result<()> {
     http_task.abort();
     watchdog_task.abort();
     bs_task.abort();
+    ur_task.abort();
     let _ = tokio::time::timeout(Duration::from_secs(5), http_task).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), watchdog_task).await;
     let _ = tokio::time::timeout(Duration::from_secs(1), bs_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), ur_task).await;
 
     info!(target: "boot", "stopped");
     Ok(())

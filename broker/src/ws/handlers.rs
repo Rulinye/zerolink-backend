@@ -36,6 +36,11 @@ pub struct WsAuth {
     pub user_id: i64,
     pub username: String,
     pub is_admin: bool,
+    /// B4.7-supp / B9: per-user broker datapath rate limit (bytes/sec)
+    /// from backend verify response. 0 = unlimited. Captured at WS
+    /// upgrade time and threaded into SessionStore.create so the
+    /// datapath bind frame can copy onto the PathEntry's TokenBucket.
+    pub rate_limit_bps: u64,
 }
 
 /// Per-call result. The connection loop uses these to update its
@@ -183,7 +188,7 @@ pub async fn handle_create_room(
 
     let (session_record, binding) = match state
         .sessions
-        .create(auth.user_id, auth.username.clone(), room.id)
+        .create(auth.user_id, auth.username.clone(), room.id, auth.rate_limit_bps)
         .await
     {
         Ok(s) => s,
@@ -337,7 +342,7 @@ pub async fn handle_join_room(
 
     let (session_record, binding) = match state
         .sessions
-        .create(auth.user_id, auth.username.clone(), room.id)
+        .create(auth.user_id, auth.username.clone(), room.id, auth.rate_limit_bps)
         .await
     {
         Ok(s) => s,

@@ -63,6 +63,14 @@ type User struct {
 	// PasswordChangedAt, when non-nil, invalidates any JWT whose iat is
 	// before this timestamp. Enables "change password -> log out everywhere".
 	PasswordChangedAt *time.Time
+
+	// RoomRateLimitBps is the per-user upper bound on broker datapath
+	// throughput when the user is in a room. Default 20 Mbps
+	// (2,500,000 bytes/sec, set by migration 0007 / B4.7-supp / B9).
+	// Hard ceiling: must remain below the main-connection rate (50 Mbps,
+	// hardcoded until Phase 5 promotes it to a separate column). Backend
+	// admin handler validates this on PATCH.
+	RoomRateLimitBps int64
 }
 
 // IsEffectivelyDisabled reports whether this user should be treated as banned
@@ -216,6 +224,15 @@ func (r *UserRepo) SetQuota(ctx context.Context, id int64, newQuota *int64) erro
 
 // ----- Batch 3.3 additions (D3.25) --------------------------------------------
 
+// SetRoomRateLimit updates a user's broker datapath rate cap. Caller
+// must validate `bps > 0` and `bps < MAIN_RATE_LIMIT_CEILING_BPS`
+// (50 Mbps). B4.7-supp / B9.
+func (r *UserRepo) SetRoomRateLimit(ctx context.Context, id int64, bps int64) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET room_rate_limit_bps = ? WHERE id = ?`, bps, id)
+	return err
+}
+
 // AddUsedBytesMain atomically increments used_bytes_main. Will be called
 // by the sing-box accounting integration (deferred — no caller in 3.3
 // itself; counter remains driven by the existing path). Kept symmetric
@@ -301,7 +318,8 @@ const userColumns = `
 	created_at, last_login_at,
 	disabled_until, quota_bytes,
 	used_bytes_main, used_bytes_room,
-	quota_reset_at, password_changed_at
+	quota_reset_at, password_changed_at,
+	room_rate_limit_bps
 `
 
 var (
@@ -326,6 +344,7 @@ func scanUser(s scanner) (*User, error) {
 		&disabledUntil, &quotaBytes,
 		&u.UsedBytesMain, &u.UsedBytesRoom,
 		&quotaResetAt, &passwordChangedAt,
+		&u.RoomRateLimitBps,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

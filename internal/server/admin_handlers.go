@@ -41,14 +41,15 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, len(users))
 	for i, u := range users {
 		row := map[string]any{
-			"id":              u.ID,
-			"username":        u.Username,
-			"is_admin":        u.IsAdmin,
-			"is_disabled":     u.IsEffectivelyDisabled(time.Now()),
-			"created_at":      u.CreatedAt.Format(time.RFC3339),
-			"used_bytes":      u.TotalUsedBytes(),
-			"used_bytes_main": u.UsedBytesMain,
-			"used_bytes_room": u.UsedBytesRoom,
+			"id":                  u.ID,
+			"username":            u.Username,
+			"is_admin":            u.IsAdmin,
+			"is_disabled":         u.IsEffectivelyDisabled(time.Now()),
+			"created_at":          u.CreatedAt.Format(time.RFC3339),
+			"used_bytes":          u.TotalUsedBytes(),
+			"used_bytes_main":     u.UsedBytesMain,
+			"used_bytes_room":     u.UsedBytesRoom,
+			"room_rate_limit_bps": u.RoomRateLimitBps,
 		}
 		if u.LastLoginAt != nil {
 			row["last_login_at"] = u.LastLoginAt.Format(time.RFC3339)
@@ -488,5 +489,111 @@ func (s *Server) handleAdminToggleBroker(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             true,
 		"broker_enabled": body.Enabled,
+	})
+}
+
+// --- B4.7-supp / B9: PATCH /api/v1/admin/users/{id}/rate-limit -----------
+//
+// Per-user broker datapath rate limit. Body: { "bps": int }.
+// Validation:
+//   - bps > 0
+//   - bps < MainRateLimitCeilingBps (50 Mbps == 6,250,000 bytes/sec)
+//
+// The MainRateLimitCeiling is hardcoded until Phase 5 promotes it to
+// a separate column (and a corresponding admin endpoint). Operator
+// surfaced the constraint: "联机限速一定要低于主连接限速,否则提示
+// 不生效". Until per-user main rate limits exist, this is the
+// effective ceiling.
+
+const MainRateLimitCeilingBps = int64(6_250_000) // 50 Mbps in bytes/sec
+
+type setRateLimitReq struct {
+	Bps int64 `json:"bps"`
+}
+
+func (s *Server) handleAdminSetUserRateLimit(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var req setRateLimitReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Bps <= 0 {
+		writeError(w, http.StatusBadRequest, "bps must be > 0")
+		return
+	}
+	if req.Bps >= MainRateLimitCeilingBps {
+		writeError(w, http.StatusBadRequest,
+			"联机限速必须低于主连接限速 (50 Mbps = 6250000 bytes/sec)")
+		return
+	}
+	// Confirm user exists for cleaner 404 vs 500.
+	if _, err := s.db.Users.GetByID(r.Context(), id); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	if err := s.db.Users.SetRoomRateLimit(r.Context(), id, req.Bps); err != nil {
+		writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                  true,
+		"room_rate_limit_bps": req.Bps,
+	})
+}
+
+// --- B4.7-supp / B3+B9 admin half: GET /api/v1/admin/usage/audit --------
+//
+// Returns current-period traffic totals + caps for all users in one
+// call so the admin "流量审计" page can render a single-screen
+// snapshot. No historical drill-down — that's Phase 5 (would need
+// the traffic detail table to be populated by per-period
+// aggregation, which the current room-half writes to users.* and
+// not to traffic.*).
+//
+// Rows include both source halves (main + room) so the UI can show
+// "main 待 Phase 5 启用" with current 0 values explicitly.
+func (s *Server) handleAdminUsageAudit(w http.ResponseWriter, r *http.Request) {
+	users, err := s.db.Users.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	out := make([]map[string]any, 0, len(users))
+	now := time.Now()
+	for _, u := range users {
+		if u.IsEffectivelyDisabled(now) {
+			// Hide disabled users from audit by default; admin can
+			// still find them via the regular user list.
+			continue
+		}
+		row := map[string]any{
+			"user_id":             u.ID,
+			"username":            u.Username,
+			"used_bytes_main":     u.UsedBytesMain,
+			"used_bytes_room":     u.UsedBytesRoom,
+			"used_bytes":          u.TotalUsedBytes(),
+			"room_rate_limit_bps": u.RoomRateLimitBps,
+		}
+		if u.QuotaBytes != nil {
+			row["quota_bytes"] = *u.QuotaBytes
+		}
+		if u.QuotaResetAt != nil {
+			row["period_end"] = u.QuotaResetAt.Format(time.RFC3339)
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"users":                      out,
+		"main_rate_limit_ceiling_bps": MainRateLimitCeilingBps,
+		"main_traffic_status":         "phase5_pending",
 	})
 }

@@ -5,6 +5,7 @@
 //! `path_map.rs` for the routing table.
 
 pub mod cert;
+pub mod limiter;
 pub mod obfs;
 pub mod path_map;
 pub mod server;

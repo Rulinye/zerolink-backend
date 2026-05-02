@@ -100,6 +100,13 @@ pub struct SessionRecord {
     /// same Arc), so updates from connection_loop's local handle
     /// are visible to the store's record.
     pub last_seen: LastSeenRef,
+    /// B4.7-supp / B9: per-user broker datapath rate limit
+    /// (bytes/sec). Sourced from backend verify response
+    /// (users.room_rate_limit_bps). 0 means unlimited. Datapath
+    /// bind-frame handler copies into the PathEntry's TokenBucket;
+    /// changes via admin endpoint take effect on next session
+    /// (re-verify path).
+    pub rate_limit_bps: u64,
 }
 
 #[derive(Clone, Default)]
@@ -148,6 +155,7 @@ impl SessionStore {
         user_id: i64,
         username: String,
         room_id: i64,
+        rate_limit_bps: u64,
     ) -> Result<(SessionRecord, WsBinding), SessionError> {
         let mut inner = self.inner.lock().await;
         if inner.by_user.contains_key(&user_id) {
@@ -163,6 +171,7 @@ impl SessionStore {
             bound_ws: Some(binding),
             grace_until: None,
             last_seen: Arc::new(StdRwLock::new(Instant::now())),
+            rate_limit_bps,
         };
         inner.by_user.insert(user_id, session_id.clone());
         let snapshot = clone_record(&rec);
@@ -355,6 +364,7 @@ fn clone_record(r: &SessionRecord) -> SessionRecord {
         // point to the same RwLock<Instant>, so updates from the
         // connection_loop hot path are visible to drain_expired.
         last_seen: r.last_seen.clone(),
+        rate_limit_bps: r.rate_limit_bps,
     }
 }
 
@@ -373,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn create_then_find_then_remove() {
         let store = SessionStore::new();
-        let (rec, _b) = store.create(42, "alice".into(), 7).await.unwrap();
+        let (rec, _b) = store.create(42, "alice".into(), 7, 0).await.unwrap();
         let found = store.find_by_user(42).await.unwrap();
         assert_eq!(found.session_id, rec.session_id);
         let removed = store.remove(&rec.session_id).await.unwrap();
@@ -384,15 +394,15 @@ mod tests {
     #[tokio::test]
     async fn duplicate_create_rejected() {
         let store = SessionStore::new();
-        store.create(42, "a".into(), 7).await.unwrap();
-        let r = store.create(42, "a".into(), 7).await;
+        store.create(42, "a".into(), 7, 0).await.unwrap();
+        let r = store.create(42, "a".into(), 7, 0).await;
         assert!(matches!(r, Err(SessionError::AlreadyExists)));
     }
 
     #[tokio::test]
     async fn detach_starts_grace() {
         let store = SessionStore::new();
-        let (rec, binding) = store.create(42, "alice".into(), 7).await.unwrap();
+        let (rec, binding) = store.create(42, "alice".into(), 7, 0).await.unwrap();
         let detached = store.detach(&rec.session_id, binding).await;
         assert_eq!(detached, Some(rec.session_id.clone()));
         let after = store.find_by_user(42).await.unwrap();
@@ -403,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn detach_with_stale_binding_is_noop() {
         let store = SessionStore::new();
-        let (rec, _binding_a) = store.create(42, "alice".into(), 7).await.unwrap();
+        let (rec, _binding_a) = store.create(42, "alice".into(), 7, 0).await.unwrap();
         // Pretend we already reattached with a new binding.
         let stale = WsBinding(99999);
         let result = store.detach(&rec.session_id, stale).await;
@@ -413,7 +423,7 @@ mod tests {
     #[tokio::test]
     async fn reattach_after_detach() {
         let store = SessionStore::new();
-        let (rec, b1) = store.create(42, "alice".into(), 7).await.unwrap();
+        let (rec, b1) = store.create(42, "alice".into(), 7, 0).await.unwrap();
         store.detach(&rec.session_id, b1).await.unwrap();
         let (rec2, b2) = store.reattach(&rec.session_id, 42).await.unwrap();
         assert_eq!(rec2.session_id, rec.session_id);
@@ -425,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn reattach_owner_mismatch() {
         let store = SessionStore::new();
-        let (rec, b1) = store.create(42, "alice".into(), 7).await.unwrap();
+        let (rec, b1) = store.create(42, "alice".into(), 7, 0).await.unwrap();
         store.detach(&rec.session_id, b1).await;
         let r = store.reattach(&rec.session_id, 999).await;
         assert!(matches!(r, Err(SessionError::OwnerMismatch)));
@@ -434,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn reattach_when_bound_rejected() {
         let store = SessionStore::new();
-        let (rec, _b1) = store.create(42, "alice".into(), 7).await.unwrap();
+        let (rec, _b1) = store.create(42, "alice".into(), 7, 0).await.unwrap();
         let r = store.reattach(&rec.session_id, 42).await;
         assert!(matches!(r, Err(SessionError::AlreadyBound)));
     }

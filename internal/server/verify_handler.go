@@ -58,6 +58,13 @@ type verifyResp struct {
 	QuotaBytes     *int64 `json:"quota_bytes,omitempty"`     // nil = unlimited
 	UsedBytes      int64  `json:"used_bytes,omitempty"`      // = main + room
 	QuotaRemaining *int64 `json:"quota_remaining,omitempty"` // nil = unlimited
+
+	// B4.7-supp / B9: per-user broker datapath rate limit (bytes/sec).
+	// Broker parks this on the SessionRecord and gates outbound +
+	// inbound datagrams through a token bucket. 0 means "no limit"
+	// (admin set bps=0 explicitly is rejected — the field is always
+	// populated to default 20 Mbps for new users via migration 0007).
+	RoomRateLimitBps int64 `json:"room_rate_limit_bps,omitempty"`
 }
 
 func (s *Server) handleVerifyJWT(w http.ResponseWriter, r *http.Request) {
@@ -120,11 +127,12 @@ func (s *Server) handleVerifyJWT(w http.ResponseWriter, r *http.Request) {
 
 	// All checks passed.
 	resp := verifyResp{
-		Valid:     true,
-		UserID:    u.ID,
-		Username:  u.Username,
-		IsAdmin:   u.IsAdmin,
-		UsedBytes: used,
+		Valid:            true,
+		UserID:           u.ID,
+		Username:         u.Username,
+		IsAdmin:          u.IsAdmin,
+		UsedBytes:        used,
+		RoomRateLimitBps: u.RoomRateLimitBps,
 	}
 	if u.QuotaBytes != nil {
 		resp.QuotaBytes = u.QuotaBytes

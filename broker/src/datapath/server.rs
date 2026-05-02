@@ -69,6 +69,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use super::cert::DatapathCert;
+use super::limiter::TokenBucket;
 use super::obfs::{ObfsConfig, ObfsSocket};
 use super::path_map::{PathEntry, PathMap};
 use crate::ws::session::SessionStore;
@@ -224,6 +225,7 @@ async fn handle_connection(
     let room_id = session.room_id;
     let user_id = session.user_id;
     let username = session.username.clone();
+    let rate_limit_bps = session.rate_limit_bps;
 
     // Build the path entry, then announce ourselves.
     let entry = Arc::new(PathEntry {
@@ -234,6 +236,10 @@ async fn handle_connection(
         control_send: Mutex::new(send),
         bytes_in: 0.into(),
         bytes_out: 0.into(),
+        // B4.7-supp / B9: per-user token bucket. rate_limit_bps from
+        // SessionRecord (sourced from backend verify response). 0 ⇒
+        // unlimited (try_consume returns true unconditionally).
+        limiter: Mutex::new(TokenBucket::new(rate_limit_bps)),
     });
 
     // Snapshot existing peers BEFORE inserting ourselves.
@@ -464,6 +470,25 @@ async fn forward_loop(entry: Arc<PathEntry>, paths: PathMap) -> anyhow::Result<(
             // malformed; drop silently
             continue;
         }
+
+        // B4.7-supp / B9: rate-limit gate. Total (in + out) bytes
+        // share one bucket per session. If we don't have enough
+        // tokens, drop the datagram (no queue — datagram channel
+        // has no retry semantics; real-time games prefer drop-now to
+        // delay-later). Forward-loop accounts the SOURCE side here;
+        // the destination side gets accounted on its own send_datagram.
+        // Each send_datagram on the destination ALSO consumes that
+        // destination's bucket — see the unicast / fan-out branches
+        // below.
+        {
+            let mut b = entry.limiter.lock().await;
+            if !b.try_consume(datagram.len() as u64) {
+                // Over budget — drop. Keep the bytes_in counter NOT
+                // bumped (don't penalize the user's quota for traffic
+                // we refused to forward).
+                continue;
+            }
+        }
         entry.add_in(datagram.len() as u64);
 
         let mut cursor = datagram.clone();
@@ -488,6 +513,17 @@ async fn forward_loop(entry: Arc<PathEntry>, paths: PathMap) -> anyhow::Result<(
                 .list_room_excluding(entry.room_id, entry.user_id)
                 .await;
             for dest in &recipients {
+                // B4.7-supp / B9: each destination gates its own
+                // outbound budget. If a recipient is at cap, we drop
+                // for that recipient (others still receive). This
+                // keeps fan-out fair — one slow recipient doesn't
+                // throttle everyone.
+                {
+                    let mut b = dest.limiter.lock().await;
+                    if !b.try_consume(out_len) {
+                        continue;
+                    }
+                }
                 match dest.conn.send_datagram(out_bytes.clone()) {
                     Ok(()) => {
                         dest.add_out(out_len);
@@ -511,6 +547,13 @@ async fn forward_loop(entry: Arc<PathEntry>, paths: PathMap) -> anyhow::Result<(
             };
             if dest.user_id == entry.user_id {
                 continue; // sending to self; drop
+            }
+            // B4.7-supp / B9: destination's outbound budget gate.
+            {
+                let mut b = dest.limiter.lock().await;
+                if !b.try_consume(out_len) {
+                    continue;
+                }
             }
             match dest.conn.send_datagram(out_bytes) {
                 Ok(()) => {

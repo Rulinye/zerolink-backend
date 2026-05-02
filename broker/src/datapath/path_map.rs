@@ -23,6 +23,8 @@ use std::sync::Arc;
 use quinn::{Connection, SendStream};
 use tokio::sync::{Mutex, RwLock};
 
+use super::limiter::TokenBucket;
+
 /// One entry per active QUIC datapath connection. Keyed externally
 /// in PathMap by `(room_id, user_id)`.
 pub struct PathEntry {
@@ -41,6 +43,11 @@ pub struct PathEntry {
     /// Bytes sent TO this client (their downlink). Counted at
     /// datagram egress.
     pub bytes_out: AtomicU64,
+    /// B4.7-supp / B9: per-session token bucket. Rate fed in from
+    /// SessionRecord at bind-frame time, sourced from backend's
+    /// verify response (users.room_rate_limit_bps). 0 = unlimited.
+    /// Counts BOTH directions against the same budget.
+    pub limiter: Mutex<TokenBucket>,
 }
 
 /// (room_id, user_id) -> path entry.
@@ -138,6 +145,20 @@ impl PathMap {
     #[allow(dead_code)] // diagnostics / future metrics
     pub async fn total(&self) -> usize {
         self.inner.read().await.len()
+    }
+
+    /// B4.7-supp / B3 (room half): drain bytes_in / bytes_out
+    /// counters across every active path. Returns
+    /// (user_id, bytes_in, bytes_out) tuples for the usage_reporter to
+    /// aggregate by user_id and POST to backend.
+    pub async fn snapshot_all(&self) -> Vec<(i64, u64, u64)> {
+        let map = self.inner.read().await;
+        map.values()
+            .map(|e| {
+                let (i, o) = e.snapshot_and_reset();
+                (e.user_id, i, o)
+            })
+            .collect()
     }
 }
 

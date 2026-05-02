@@ -1,0 +1,4 @@
+-- 0007_user_room_rate_limit.down.sql
+--
+-- No-op per backend/CLAUDE.md (modernc SQLite < 3.35 cannot drop
+-- columns; project policy is to accept irreversible column adds).

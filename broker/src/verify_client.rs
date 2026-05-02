@@ -70,6 +70,11 @@ pub struct VerifyResponse {
     pub used_bytes: Option<i64>,
     #[serde(default)]
     pub quota_remaining: Option<i64>,
+    /// B4.7-supp / B9: per-user broker datapath rate limit (bytes/sec).
+    /// Default 20 Mbps when missing. Broker enforces via per-session
+    /// token bucket in `datapath/limiter.rs`.
+    #[serde(default)]
+    pub room_rate_limit_bps: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
