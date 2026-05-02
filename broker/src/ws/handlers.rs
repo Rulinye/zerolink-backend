@@ -79,6 +79,18 @@ pub async fn handle_create_room(
     params: Json,
     in_room: bool,
 ) -> HandlerOutput {
+    // B4.7-supp / B6: defense-in-depth. Admin may have toggled this
+    // broker's nodes.broker_enabled / is_enabled to false; the
+    // background poller (broker_status::run_poller) reflects that
+    // within ~15s. Reject create here so a stale client cache picking
+    // a disabled broker gets a clean error instead of being kicked
+    // out by the watchdog post-create.
+    if !state.broker_status.is_enabled() {
+        return err(
+            "broker_disabled",
+            "this broker is currently disabled by an administrator",
+        );
+    }
     if in_room {
         return err(
             "already_in_room",
@@ -235,6 +247,15 @@ pub async fn handle_join_room(
     params: Json,
     in_room: bool,
 ) -> HandlerOutput {
+    // B4.7-supp / B6: same gate as create_room — disabled broker
+    // rejects new joins. Existing rooms continue to run; only NEW
+    // session admission is blocked.
+    if !state.broker_status.is_enabled() {
+        return err(
+            "broker_disabled",
+            "this broker is currently disabled by an administrator",
+        );
+    }
     if in_room {
         return err(
             "already_in_room",

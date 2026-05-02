@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::broker_status::BrokerStatusWatcher;
 use crate::config::Config;
 use crate::datapath::{DatapathInfo, PathMap};
 use crate::storage::Storage;
@@ -21,6 +22,12 @@ pub struct AppState {
     pub broadcast: BroadcastHub,
     pub datapath: Arc<DatapathInfo>,
     pub datapath_paths: PathMap,
+    /// B4.7-supp / B6: live view of `nodes.broker_enabled AND
+    /// nodes.is_enabled` for THIS broker. Updated every 15s by the
+    /// `broker_status` polling task spawned in main.rs. WS handlers
+    /// read it before accepting create_room / join_room so admins
+    /// can hard-disable a broker without service restart.
+    pub broker_status: BrokerStatusWatcher,
     pub version: &'static str,
 }
 

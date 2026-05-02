@@ -1,5 +1,6 @@
 //! zerolink-broker — room signaling + L3 datapath relay daemon.
 
+mod broker_status;
 mod config;
 mod datapath;
 mod http;
@@ -14,6 +15,7 @@ use std::time::Duration;
 use tokio::signal;
 use tracing::{error, info, warn};
 
+use crate::broker_status::BrokerStatusWatcher;
 use crate::config::Config;
 use crate::datapath::{generate_cert, start_server, DatapathInfo, ObfsConfig};
 use crate::http::AppState;
@@ -92,6 +94,31 @@ async fn main() -> anyhow::Result<()> {
         "datapath listening"
     );
 
+    // B4.7-supp / B6: per-broker enabled-flag watcher. Background poll
+    // hits backend's GET /api/v1/broker-status?short_id=... every 15s
+    // and updates an AtomicBool. WS handlers read it to short-circuit
+    // create_room / join_room when admin has flipped the flag off.
+    let broker_status = BrokerStatusWatcher::new();
+    let bs_http = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .build()
+        .context("build broker_status http client")?;
+    let bs_watcher_for_task = broker_status.clone();
+    let bs_backend_url = cfg.backend_url.clone();
+    let bs_service_token = cfg.service_token.clone();
+    let bs_short_id = cfg.short_id.clone();
+    let bs_task = tokio::spawn(async move {
+        broker_status::run_poller(
+            bs_watcher_for_task,
+            bs_http,
+            bs_backend_url,
+            bs_service_token,
+            bs_short_id,
+            Duration::from_secs(15),
+        )
+        .await;
+    });
+
     let state = AppState {
         config: Arc::new(cfg.clone()),
         verify: verify.clone(),
@@ -100,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         broadcast: broadcast.clone(),
         datapath: datapath_info.clone(),
         datapath_paths: datapath_paths.clone(),
+        broker_status: broker_status.clone(),
         version: VERSION,
     };
 
@@ -133,8 +161,10 @@ async fn main() -> anyhow::Result<()> {
 
     http_task.abort();
     watchdog_task.abort();
+    bs_task.abort();
     let _ = tokio::time::timeout(Duration::from_secs(5), http_task).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), watchdog_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), bs_task).await;
 
     info!(target: "boot", "stopped");
     Ok(())

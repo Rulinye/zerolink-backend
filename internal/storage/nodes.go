@@ -138,6 +138,16 @@ func (r *NodeRepo) GetByName(ctx context.Context, name string) (*Node, error) {
 	return scanNode(row)
 }
 
+// GetByBrokerShortID loads a node by its broker_short_id (KR / GZ).
+// Returns ErrNotFound if no broker node has that short_id. Used by the
+// per-broker enabled status endpoint (B4.7-supp / B6) so each broker
+// can poll the backend for its own enable/disable state.
+func (r *NodeRepo) GetByBrokerShortID(ctx context.Context, shortID string) (*Node, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+nodeSelectColumns+` FROM nodes WHERE broker_short_id = ?`, shortID)
+	return scanNode(row)
+}
+
 // List returns nodes ordered by sort_order, name. If onlyEnabled is true,
 // disabled nodes are filtered out (this is what end users see).
 func (r *NodeRepo) List(ctx context.Context, onlyEnabled bool) ([]*Node, error) {

@@ -136,3 +136,46 @@ func (s *Server) handleVerifyJWT(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// --- GET /api/v1/broker-status?short_id=KR ---------------------------------
+//
+// B4.7-supp / B6: per-broker enabled status. Brokers poll this every 15s
+// and reject create/join requests when their own `broker_enabled` flag
+// has been flipped off via the admin UI. Defense in depth alongside the
+// client-side filtering of `has_broker=false` rows from
+// `GET /api/v1/nodes`.
+//
+// Auth: Bearer service_token (validated by serviceTokenMiddleware).
+//
+// Query: ?short_id=<broker short id> (e.g. "KR", "GZ"). Required.
+//
+// Response 200:
+//   { "short_id": "KR", "broker_enabled": true, "is_enabled": true }
+//
+// Response 404 if no node has that broker_short_id.
+//
+// Note: returns BOTH the per-broker `broker_enabled` operational flag
+// AND the per-node `is_enabled` flag. Either one being false should
+// cause the broker to reject new sessions; existing rooms continue to
+// run until they naturally end (no force-disconnect on flag flip).
+func (s *Server) handleBrokerStatus(w http.ResponseWriter, r *http.Request) {
+	shortID := r.URL.Query().Get("short_id")
+	if shortID == "" {
+		writeError(w, http.StatusBadRequest, "missing short_id")
+		return
+	}
+	n, err := s.db.Nodes.GetByBrokerShortID(r.Context(), shortID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no broker with that short_id")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"short_id":       shortID,
+		"broker_enabled": n.BrokerEnabled,
+		"is_enabled":     n.IsEnabled,
+	})
+}

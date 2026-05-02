@@ -47,6 +47,11 @@ func (s *Server) buildRouter() chi.Router {
 		r.Group(func(r chi.Router) {
 			r.Use(s.serviceTokenMiddleware)
 			r.Post("/auth/verify", s.handleVerifyJWT)
+			// B4.7-supp / B6: per-broker enabled status. Brokers poll
+			// every 15s and reject create/join when their own
+			// broker_enabled flips to false (defense in depth alongside
+			// client-side filtering of has_broker=false from /api/v1/nodes).
+			r.Get("/broker-status", s.handleBrokerStatus)
 		})
 
 		// Authenticated (user).
