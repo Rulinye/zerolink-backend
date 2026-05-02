@@ -16,13 +16,32 @@ pub mod handlers;
 pub mod protocol;
 pub mod session;
 
+use std::time::Duration;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use tokio::sync::broadcast as tokio_broadcast;
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
+
+/// Phase 4.7-K2: how often the server sends an unsolicited Ping frame
+/// to the client. tokio_tungstenite (the WS impl axum wraps) replies
+/// with Pong automatically without surfacing the Ping to the client app.
+/// 15s is a balance: short enough to detect a dead client well within
+/// the watchdog grace window (30s); long enough that 100 idle WS
+/// connections cost only ~6 ping/sec across all of them.
+const WS_LIVENESS_PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Phase 4.7-K2: kill the WS if no inbound frame (any frame, including
+/// the auto-Pong reply) arrives for this long. Must be > one ping
+/// interval + RTT so we never close a healthy LAN client by accident.
+/// 60s = 4 ping cycles of headroom; once we see ZERO inbound across
+/// 60s we assume the client is dead even if the kernel hasn't yet
+/// reported a TCP error.
+const WS_INBOUND_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 use crate::http::AppState;
 use crate::verify_client::VerifyError;
@@ -100,38 +119,56 @@ struct InRoom {
 
 async fn connection_loop(mut socket: WebSocket, state: AppState, auth: WsAuth) {
     let mut current: Option<InRoom> = None;
+    // Phase 4.7-K2: liveness state. `last_inbound` updates on EVERY
+    // inbound frame — text RPC, ping from client, pong reply to our
+    // ping, even an ignored binary frame. If it doesn't update for
+    // WS_INBOUND_IDLE_TIMEOUT, we treat the client as dead and
+    // exit the loop, hitting the detach path below.
+    let mut last_inbound = Instant::now();
+    let mut ping_tick = tokio::time::interval(WS_LIVENESS_PING_INTERVAL);
+    // Don't fire on t=0; first ping at t=15s is plenty of buffer for
+    // the just-upgraded client to send anything. MissedTickBehavior::Skip
+    // so a slow event handler doesn't queue a ping storm.
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ping_tick.tick().await; // consume the immediate first tick
 
     loop {
-        // Two-way select: read client frame OR push broadcast event.
-        let next = {
-            // We can't borrow current.event_rx mutably while still
-            // wanting to drop `current` later inside the same scope,
-            // so split the select into a small helper.
-            select_next(&mut socket, current.as_mut()).await
-        };
+        // Three-way select: read client frame OR push broadcast event
+        // OR fire a liveness ping. Helper handles the borrow shape.
+        let next = select_next(&mut socket, current.as_mut(), &mut ping_tick).await;
 
         match next {
-            NextEvent::ClientMessage(Ok(msg)) => match msg {
-                Message::Text(text) => {
-                    if let Err(()) =
-                        handle_client_text(&state, &auth, &mut socket, &mut current, &text).await
-                    {
-                        // Fatal protocol error → close.
-                        break;
+            NextEvent::ClientMessage(Ok(msg)) => {
+                last_inbound = Instant::now();
+                match msg {
+                    Message::Text(text) => {
+                        if let Err(()) =
+                            handle_client_text(&state, &auth, &mut socket, &mut current, &text)
+                                .await
+                        {
+                            // Fatal protocol error → close.
+                            break;
+                        }
                     }
+                    Message::Binary(_) => {
+                        // 3.3 protocol is JSON only; binary frames are
+                        // reserved for future use (datapath is on quinn,
+                        // not WS).
+                        debug!(target: "ws", "ignoring binary frame");
+                    }
+                    Message::Ping(p) => {
+                        let _ = socket.send(Message::Pong(p)).await;
+                    }
+                    Message::Pong(_) => {
+                        // tokio_tungstenite handles ping/pong frames
+                        // mostly transparently, but a Pong reply to OUR
+                        // liveness ping does surface here (axum unwraps
+                        // it). Just bumping last_inbound (already done
+                        // above) is the whole job.
+                    }
+                    Message::Close(_) => break,
                 }
-                Message::Binary(_) => {
-                    // 3.3 protocol is JSON only; binary frames are
-                    // reserved for future use (datapath is on quinn,
-                    // not WS).
-                    debug!(target: "ws", "ignoring binary frame");
-                }
-                Message::Ping(p) => {
-                    let _ = socket.send(Message::Pong(p)).await;
-                }
-                Message::Pong(_) => {}
-                Message::Close(_) => break,
-            },
+            }
             NextEvent::ClientMessage(Err(e)) => {
                 debug!(target: "ws", err = %e, "ws read error; closing");
                 break;
@@ -173,6 +210,28 @@ async fn connection_loop(mut socket: WebSocket, state: AppState, auth: WsAuth) {
                 debug!(target: "ws", "broadcast channel closed; closing ws");
                 break;
             }
+            NextEvent::PingTick => {
+                // Phase 4.7-K2: liveness check. If we've been silent on
+                // the inbound side for too long, the client is dead;
+                // breaking the loop hits the detach path below — the
+                // SAME path a clean close would have taken — so the
+                // session enters grace and the watchdog cleans up.
+                if last_inbound.elapsed() > WS_INBOUND_IDLE_TIMEOUT {
+                    info!(
+                        target: "ws",
+                        user_id = auth.user_id,
+                        idle_secs = last_inbound.elapsed().as_secs(),
+                        "ws inbound idle timeout; closing for liveness"
+                    );
+                    break;
+                }
+                // Send an unsolicited Ping. Empty payload is fine —
+                // tokio_tungstenite copies it back as the Pong's payload.
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    debug!(target: "ws", "ws ping send failed; closing");
+                    break;
+                }
+            }
         }
     }
 
@@ -198,26 +257,39 @@ async fn connection_loop(mut socket: WebSocket, state: AppState, auth: WsAuth) {
 enum NextEvent {
     ClientMessage(Result<Message, axum::Error>),
     BroadcastEvent(Result<RoomEvent, tokio_broadcast::error::RecvError>),
+    /// Phase 4.7-K2: liveness ping cadence elapsed.
+    PingTick,
 }
 
-async fn select_next(socket: &mut WebSocket, in_room: Option<&mut InRoom>) -> NextEvent {
+async fn select_next(
+    socket: &mut WebSocket,
+    in_room: Option<&mut InRoom>,
+    ping_tick: &mut tokio::time::Interval,
+) -> NextEvent {
     use futures_util::stream::StreamExt;
     match in_room {
         Some(ir) => tokio::select! {
             // Biased so we strictly drain client requests when
             // both client and broadcast are ready (preserves the
             // intuition that a request placed BEFORE an event
-            // gets a response BEFORE the event).
+            // gets a response BEFORE the event). Ping tick is last
+            // — only fires when neither client nor broadcast has
+            // anything ready.
             biased;
             client = socket.next() => match client {
                 Some(r) => NextEvent::ClientMessage(r),
                 None    => NextEvent::ClientMessage(Err(axum::Error::new("stream closed"))),
             },
             evt = ir.event_rx.recv() => NextEvent::BroadcastEvent(evt),
+            _ = ping_tick.tick() => NextEvent::PingTick,
         },
-        None => match socket.next().await {
-            Some(r) => NextEvent::ClientMessage(r),
-            None => NextEvent::ClientMessage(Err(axum::Error::new("stream closed"))),
+        None => tokio::select! {
+            biased;
+            client = socket.next() => match client {
+                Some(r) => NextEvent::ClientMessage(r),
+                None => NextEvent::ClientMessage(Err(axum::Error::new("stream closed"))),
+            },
+            _ = ping_tick.tick() => NextEvent::PingTick,
         },
     }
 }
