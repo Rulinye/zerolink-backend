@@ -1,6 +1,6 @@
 [package]
 name = "zerolink-broker"
-version = "0.4.0-rc10"
+version = "0.4.0-rc11"
 edition = "2021"
 publish = false
 description = "0-0link broker daemon: room signaling + L3 datapath relay"

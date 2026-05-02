@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE members SET last_seen_at = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "336ed4dbd04f615245382e20d6bb7d62f8d9458bb333b38dcbc6bbde13b33a59"
+}

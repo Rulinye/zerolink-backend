@@ -32,6 +32,10 @@ impl MemberRepo {
     /// Insert a (room_id, user_id) member, or refresh last_seen_at if
     /// the user is already a member of this room (rejoin path).
     /// Returns the resulting Member row.
+    ///
+    /// B4.7-K3: ON CONFLICT also clears `left_at` back to NULL so a
+    /// previously-left member rejoining is restored to current
+    /// membership without a separate undelete step.
     pub async fn join(
         &self,
         room_id: i64,
@@ -45,7 +49,8 @@ impl MemberRepo {
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(room_id, user_id) DO UPDATE SET
                 last_seen_at = excluded.last_seen_at,
-                username     = excluded.username
+                username     = excluded.username,
+                left_at      = NULL
             RETURNING id AS "id!", room_id, user_id, username,
                       joined_at, last_seen_at, public_endpoint
             "#,
@@ -68,11 +73,20 @@ impl MemberRepo {
         })
     }
 
-    /// Remove a member from a room. Returns true if a row was
-    /// removed, false if the user wasn't a member to begin with.
+    /// Soft-remove a member from a room: mark `left_at = now` so the
+    /// dashboard can keep showing the room as joined-history until
+    /// the room itself is destroyed. Returns true if a currently-
+    /// active row was found, false if the user wasn't a member or
+    /// already left.
+    ///
+    /// B4.7-K3 closure (was: hard DELETE before 0003 migration).
+    /// Rejoin path is via `MemberRepo::join` which UPSERTs + clears
+    /// `left_at` back to NULL.
     pub async fn leave(&self, room_id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
+        let now = chrono::Utc::now().timestamp();
         let res = sqlx::query!(
-            "DELETE FROM members WHERE room_id = ? AND user_id = ?",
+            "UPDATE members SET left_at = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
+            now,
             room_id,
             user_id
         )
@@ -81,8 +95,9 @@ impl MemberRepo {
         Ok(res.rows_affected() > 0)
     }
 
-    /// List all current members of a room, ordered by joined_at
-    /// (so the owner / earliest joiner shows up first).
+    /// List all CURRENT members of a room (excludes left rows),
+    /// ordered by joined_at (so the owner / earliest joiner shows
+    /// up first). B4.7-K3: filters `left_at IS NULL`.
     pub async fn list(&self, room_id: i64) -> Result<Vec<Member>, sqlx::Error> {
         let rows = sqlx::query!(
             r#"
@@ -90,6 +105,7 @@ impl MemberRepo {
                    joined_at, last_seen_at, public_endpoint
               FROM members
              WHERE room_id = ?
+               AND left_at IS NULL
              ORDER BY joined_at
             "#,
             room_id
@@ -110,7 +126,8 @@ impl MemberRepo {
             .collect())
     }
 
-    /// Bump last_seen_at on a member's heartbeat.
+    /// Bump last_seen_at on a member's heartbeat. B4.7-K3: only
+    /// touches CURRENT members; left rows are inert history.
     pub async fn touch_heartbeat(
         &self,
         room_id: i64,
@@ -118,7 +135,7 @@ impl MemberRepo {
         now: i64,
     ) -> Result<(), sqlx::Error> {
         sqlx::query!(
-            "UPDATE members SET last_seen_at = ? WHERE room_id = ? AND user_id = ?",
+            "UPDATE members SET last_seen_at = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
             now,
             room_id,
             user_id
@@ -128,12 +145,12 @@ impl MemberRepo {
         Ok(())
     }
 
-    /// Count current members of a room. Used by the leave handler to
-    /// detect "the leaver was the last member -> trigger empty_grace
-    /// transition on the room".
+    /// Count CURRENT members of a room (excludes left rows). Used by
+    /// the leave handler to detect "the leaver was the last member
+    /// -> trigger empty_grace transition on the room". B4.7-K3.
     pub async fn count_in_room(&self, room_id: i64) -> Result<i64, sqlx::Error> {
         let row = sqlx::query!(
-            "SELECT COUNT(*) AS n FROM members WHERE room_id = ?",
+            "SELECT COUNT(*) AS n FROM members WHERE room_id = ? AND left_at IS NULL",
             room_id
         )
         .fetch_one(&self.pool)
@@ -156,7 +173,7 @@ impl MemberRepo {
         value: Option<&str>,
     ) -> Result<bool, sqlx::Error> {
         let res = sqlx::query!(
-            "UPDATE members SET public_endpoint = ? WHERE room_id = ? AND user_id = ?",
+            "UPDATE members SET public_endpoint = ? WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
             value,
             room_id,
             user_id
@@ -170,13 +187,14 @@ impl MemberRepo {
     /// Returns `Ok(None)` when the member row exists but has never
     /// been published, AND when the member row doesn't exist —
     /// callers shouldn't distinguish (race recovery is best-effort).
+    /// B4.7-K3: ignores left rows (their endpoint is stale).
     pub async fn get_public_endpoint(
         &self,
         room_id: i64,
         user_id: i64,
     ) -> Result<Option<String>, sqlx::Error> {
         let row = sqlx::query!(
-            "SELECT public_endpoint FROM members WHERE room_id = ? AND user_id = ?",
+            "SELECT public_endpoint FROM members WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
             room_id,
             user_id
         )

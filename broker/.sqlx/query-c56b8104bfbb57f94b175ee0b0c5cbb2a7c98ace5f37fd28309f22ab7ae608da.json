@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) AS n FROM members WHERE room_id = ?",
+  "query": "SELECT COUNT(*) AS n FROM members WHERE room_id = ? AND left_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "6d069cec5beb1b84a7bbca90b71d1712180e8fef8459f09a4858d58798b3727f"
+  "hash": "c56b8104bfbb57f94b175ee0b0c5cbb2a7c98ace5f37fd28309f22ab7ae608da"
 }

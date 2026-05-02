@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n            SELECT id AS \"id!\", room_id, user_id, username,\n                   joined_at, last_seen_at, public_endpoint\n              FROM members\n             WHERE room_id = ?\n             ORDER BY joined_at\n            ",
+  "query": "\n            SELECT id AS \"id!\", room_id, user_id, username,\n                   joined_at, last_seen_at, public_endpoint\n              FROM members\n             WHERE room_id = ?\n               AND left_at IS NULL\n             ORDER BY joined_at\n            ",
   "describe": {
     "columns": [
       {
@@ -52,5 +52,5 @@
       true
     ]
   },
-  "hash": "188fa2aaa33f8a91739d0c5f69e0cb8b5a5fa6b627cae733f8b73c34e24da0b7"
+  "hash": "0ea3a2db80e8d2e6f8a4c9c149ad0a2f69f99efb10fd92be4c7eea270c0aa329"
 }

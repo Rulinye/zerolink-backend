@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT public_endpoint FROM members WHERE room_id = ? AND user_id = ?",
+  "query": "SELECT public_endpoint FROM members WHERE room_id = ? AND user_id = ? AND left_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       true
     ]
   },
-  "hash": "73ff7da86010324d7133aae29e05313310aecc55a3d507d4c9494c1835631abb"
+  "hash": "e2fa96dd6529d33bcf5110b9a36c9b174c64c24105edc72a7d27261900a4010c"
 }
