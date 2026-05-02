@@ -592,7 +592,7 @@ func (s *Server) handleAdminUsageAudit(w http.ResponseWriter, r *http.Request) {
 		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"users":                      out,
+		"users":                       out,
 		"main_rate_limit_ceiling_bps": MainRateLimitCeilingBps,
 		"main_traffic_status":         "phase5_pending",
 	})

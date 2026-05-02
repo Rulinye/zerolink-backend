@@ -158,7 +158,8 @@ func (s *Server) handleVerifyJWT(w http.ResponseWriter, r *http.Request) {
 // Query: ?short_id=<broker short id> (e.g. "KR", "GZ"). Required.
 //
 // Response 200:
-//   { "short_id": "KR", "broker_enabled": true, "is_enabled": true }
+//
+//	{ "short_id": "KR", "broker_enabled": true, "is_enabled": true }
 //
 // Response 404 if no node has that broker_short_id.
 //
