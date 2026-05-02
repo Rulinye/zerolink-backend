@@ -1,0 +1,6 @@
+-- 0006_invites_fk_set_null.down.sql
+--
+-- No-op per backend/CLAUDE.md (modernc SQLite < 3.35 cannot ALTER
+-- COLUMN; the up-migration's table-recreate would have to be reversed
+-- with another full recreate. Project policy is to accept that
+-- down-migrations are not fully reversible for column-shape changes).

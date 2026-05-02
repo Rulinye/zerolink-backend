@@ -20,9 +20,15 @@ import (
 )
 
 // Invite is the row shape for the invites table.
+//
+// B4.7 supplement / B4: CreatedBy and UsedBy are both nullable since
+// migration 0006 changed both FK references to ON DELETE SET NULL.
+// A NULL CreatedBy means the creator has been deleted from the system;
+// a NULL UsedBy means the consumer was deleted but the invite was
+// previously consumed (UsedAt is the authoritative consumed-marker).
 type Invite struct {
 	Code      string
-	CreatedBy int64
+	CreatedBy *int64
 	CreatedAt time.Time
 	ExpiresAt time.Time
 	UsedBy    *int64
@@ -30,8 +36,11 @@ type Invite struct {
 	Note      string
 }
 
-// IsConsumed reports whether the invite has been redeemed.
-func (i *Invite) IsConsumed() bool { return i.UsedBy != nil }
+// IsConsumed reports whether the invite has been redeemed. After
+// migration 0006 (FK SET NULL), UsedBy can be nulled when the
+// consuming user is deleted post-consume; UsedAt remains as the
+// authoritative consumed-marker timestamp.
+func (i *Invite) IsConsumed() bool { return i.UsedAt != nil }
 
 // IsExpired reports whether the invite is past its expiry timestamp.
 func (i *Invite) IsExpired() bool { return time.Now().After(i.ExpiresAt) }
@@ -120,9 +129,10 @@ func (r *InviteRepo) MintWithOptions(ctx context.Context, opts MintOptions) ([]*
 			}
 			return nil, err
 		}
+		createdByCopy := opts.CreatedBy
 		out = append(out, &Invite{
 			Code:      code,
-			CreatedBy: opts.CreatedBy,
+			CreatedBy: &createdByCopy,
 			CreatedAt: time.Now().UTC(),
 			ExpiresAt: expiresAt,
 			Note:      opts.Note,
@@ -139,7 +149,7 @@ func (r *InviteRepo) Consume(ctx context.Context, code string, userID int64) err
 		UPDATE invites
 		   SET used_by = ?, used_at = ?
 		 WHERE code = ?
-		   AND used_by IS NULL
+		   AND used_at IS NULL
 		   AND expires_at > ?
 	`, userID, now, code, now)
 	if err != nil {
@@ -222,15 +232,20 @@ const selectInviteSQL = `
 
 func scanInvite(s scanner) (*Invite, error) {
 	var inv Invite
+	var createdBy sql.NullInt64
 	var usedBy sql.NullInt64
 	var usedAt sql.NullTime
-	err := s.Scan(&inv.Code, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt,
+	err := s.Scan(&inv.Code, &createdBy, &inv.CreatedAt, &inv.ExpiresAt,
 		&usedBy, &usedAt, &inv.Note)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if createdBy.Valid {
+		c := createdBy.Int64
+		inv.CreatedBy = &c
 	}
 	if usedBy.Valid {
 		u := usedBy.Int64
