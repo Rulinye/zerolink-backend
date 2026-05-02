@@ -25,13 +25,44 @@
 //! handler) after consulting `SessionStore::find_by_user`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use rand::RngCore;
 use tokio::sync::Mutex;
 
 pub const GRACE_DURATION: Duration = Duration::from_secs(30);
+
+/// Phase 4.7-K2 rc9 enhancement: belt-and-suspenders cleanup for
+/// sessions whose WS task was aborted before reaching the detach
+/// path (e.g. tokio runtime drop on client process kill, panic in
+/// connection_loop, OR — the rc8-discovered hole — connection_loop
+/// reached `break` via PingTick idle timeout but `current` was
+/// `None` so the `if let Some(in_room) = current { detach }` block
+/// at the end did NOT run, leaving an OLD bound session from a
+/// PRIOR ws connection's join_room un-cleaned).
+///
+/// drain_expired drains sessions where:
+///   - existing: `bound_ws.is_none() && grace_until.is_some_and(<=now)`
+///     (graceful disconnect path completed normally)
+///   - NEW: `bound_ws.is_some() && last_seen.elapsed() > 2min`
+///     (zombie — the bound ws task hasn't bumped last_seen in too
+///     long; even if the WS struct is "alive" from broker's POV,
+///     the actual client is gone)
+///
+/// 2 minutes balances:
+///   - false positives (LAN client could legitimately go silent
+///     for 30-60s on flaky wifi)
+///   - real client death detection (rc8 ping interval 15s × 4
+///     cycles + 30s grace + 30s slack = 120s)
+pub const ZOMBIE_THRESHOLD: Duration = Duration::from_secs(120);
+
+/// Shared timestamp of the last inbound frame for a session.
+/// connection_loop bumps via the Arc on every inbound; SessionStore
+/// reads in `drain_expired` for the zombie check. std::sync::RwLock
+/// (not tokio) because writes are sub-microsecond and we don't want
+/// async overhead on the per-frame hot path.
+pub type LastSeenRef = Arc<StdRwLock<Instant>>;
 
 /// Logical handle a WS connection holds while bound to a session. A
 /// fresh handle is allocated on every (re)attach, so that an old
@@ -61,6 +92,14 @@ pub struct SessionRecord {
     pub bound_ws: Option<WsBinding>,
     /// Some(deadline) when in grace; None when bound.
     pub grace_until: Option<Instant>,
+    /// Phase 4.7-K2 rc9: shared last-inbound timestamp. Bumped by
+    /// connection_loop on every WS inbound frame (text, ping, pong,
+    /// binary, close). drain_expired reads via this Arc to detect
+    /// zombie sessions whose ws task died without graceful detach.
+    /// Cloned across SessionRecord copies (clone_record shares the
+    /// same Arc), so updates from connection_loop's local handle
+    /// are visible to the store's record.
+    pub last_seen: LastSeenRef,
 }
 
 #[derive(Clone, Default)]
@@ -123,6 +162,7 @@ impl SessionStore {
             room_id,
             bound_ws: Some(binding),
             grace_until: None,
+            last_seen: Arc::new(StdRwLock::new(Instant::now())),
         };
         inner.by_user.insert(user_id, session_id.clone());
         let snapshot = clone_record(&rec);
@@ -194,6 +234,11 @@ impl SessionStore {
         let binding = WsBinding::next();
         rec.bound_ws = Some(binding);
         rec.grace_until = None;
+        // Phase 4.7-K2 rc9: bump last_seen on reattach so the new
+        // ws session starts with a fresh idle window.
+        if let Ok(mut g) = rec.last_seen.write() {
+            *g = Instant::now();
+        }
         Ok((clone_record(rec), binding))
     }
 
@@ -225,7 +270,17 @@ impl SessionStore {
         let expired_ids: Vec<String> = inner
             .sessions
             .iter()
-            .filter(|(_, rec)| rec.bound_ws.is_none() && rec.grace_until.is_some_and(|d| d <= now))
+            .filter(|(_, rec)| {
+                // Existing path: graceful disconnect → grace expired.
+                let grace_expired =
+                    rec.bound_ws.is_none() && rec.grace_until.is_some_and(|d| d <= now);
+                // Phase 4.7-K2 rc9: zombie path. bound_ws=Some but
+                // last_seen too old → ws task is dead/aborted.
+                let last_seen = rec.last_seen.read().ok().map(|g| *g);
+                let zombie = rec.bound_ws.is_some()
+                    && last_seen.is_some_and(|ls| now.duration_since(ls) > ZOMBIE_THRESHOLD);
+                grace_expired || zombie
+            })
             .map(|(sid, _)| sid.clone())
             .collect();
 
@@ -252,6 +307,11 @@ fn clone_record(r: &SessionRecord) -> SessionRecord {
         room_id: r.room_id,
         bound_ws: r.bound_ws,
         grace_until: r.grace_until,
+        // Phase 4.7-K2 rc9: SHARE the Arc — connection_loop's local
+        // SessionRecord copy and the SessionStore's master entry both
+        // point to the same RwLock<Instant>, so updates from the
+        // connection_loop hot path are visible to drain_expired.
+        last_seen: r.last_seen.clone(),
     }
 }
 

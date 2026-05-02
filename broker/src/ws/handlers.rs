@@ -58,6 +58,11 @@ pub enum SideEffect {
         session_id: String,
         binding: WsBinding,
         rx: broadcast::Receiver<RoomEvent>,
+        /// Phase 4.7-K2 rc9: shared last_seen timestamp Arc.
+        /// connection_loop holds this Arc and bumps it on every
+        /// inbound frame; SessionStore.drain_expired uses it to
+        /// detect zombie sessions whose ws task died abruptly.
+        last_seen: crate::ws::session::LastSeenRef,
     },
     /// User left the room (leave_room or destroy_room). Connection
     /// returns to idle state.
@@ -207,6 +212,7 @@ pub async fn handle_create_room(
     })
     .expect("CreateRoomResult serializable");
 
+    let last_seen = session_record.last_seen.clone();
     HandlerOutput {
         result: Ok(result),
         side_effect: SideEffect::EnterRoom {
@@ -214,6 +220,7 @@ pub async fn handle_create_room(
             session_id: session_record.session_id,
             binding,
             rx,
+            last_seen,
         },
     }
 }
@@ -384,6 +391,7 @@ pub async fn handle_join_room(
     })
     .expect("JoinRoomResult serializable");
 
+    let last_seen = session_record.last_seen.clone();
     HandlerOutput {
         result: Ok(result),
         side_effect: SideEffect::EnterRoom {
@@ -391,6 +399,7 @@ pub async fn handle_join_room(
             session_id: session_record.session_id,
             binding,
             rx,
+            last_seen,
         },
     }
 }
@@ -701,6 +710,7 @@ pub async fn handle_resume_session(
     })
     .expect("ResumeSessionResult serializable");
 
+    let last_seen = session_record.last_seen.clone();
     HandlerOutput {
         result: Ok(result),
         side_effect: SideEffect::EnterRoom {
@@ -708,6 +718,7 @@ pub async fn handle_resume_session(
             session_id: session_record.session_id,
             binding,
             rx,
+            last_seen,
         },
     }
 }

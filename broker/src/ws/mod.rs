@@ -115,6 +115,12 @@ struct InRoom {
     binding: WsBinding,
     /// Receiver from BroadcastHub for this room.
     event_rx: tokio_broadcast::Receiver<RoomEvent>,
+    /// Phase 4.7-K2 rc9: shared last_seen Arc with SessionStore.
+    /// connection_loop bumps via this Arc on every inbound frame
+    /// (see ClientMessage(Ok) arm). drain_expired reads via the
+    /// SAME Arc to detect zombie sessions whose ws task died
+    /// before reaching the detach path.
+    last_seen: crate::ws::session::LastSeenRef,
 }
 
 async fn connection_loop(mut socket: WebSocket, state: AppState, auth: WsAuth) {
@@ -140,6 +146,19 @@ async fn connection_loop(mut socket: WebSocket, state: AppState, auth: WsAuth) {
         match next {
             NextEvent::ClientMessage(Ok(msg)) => {
                 last_inbound = Instant::now();
+                // Phase 4.7-K2 rc9: bump session's shared last_seen
+                // so SessionStore.drain_expired's zombie cleanup
+                // doesn't drop us. Safe to skip when current=None
+                // (no session yet — nothing to keep alive).
+                // session.rs uses std::time::Instant (sync RwLock for
+                // the per-frame hot path); broker mod.rs uses
+                // tokio::time::Instant for the timer arithmetic.
+                // Cheap separate now() — both are monotonic.
+                if let Some(ref ir) = current {
+                    if let Ok(mut g) = ir.last_seen.write() {
+                        *g = std::time::Instant::now();
+                    }
+                }
                 match msg {
                     Message::Text(text) => {
                         if let Err(()) =
@@ -420,12 +439,14 @@ fn apply_side_effect(current: &mut Option<InRoom>, eff: SideEffect) {
             session_id,
             binding,
             rx,
+            last_seen,
         } => {
             *current = Some(InRoom {
                 room_id,
                 session_id,
                 binding,
                 event_rx: rx,
+                last_seen,
             });
         }
         SideEffect::ExitRoom => {
