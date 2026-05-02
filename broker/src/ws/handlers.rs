@@ -226,6 +226,7 @@ pub async fn handle_create_room(
         quic_endpoint: state.datapath.endpoint.clone(),
         quic_fingerprint: state.datapath.fingerprint.clone(),
         room_type: room.room_type,
+        path_strategy: room.path_strategy,
     })
     .expect("CreateRoomResult serializable");
 
@@ -414,6 +415,7 @@ pub async fn handle_join_room(
         quic_endpoint: state.datapath.endpoint.clone(),
         quic_fingerprint: state.datapath.fingerprint.clone(),
         room_type: room.room_type,
+        path_strategy: room.path_strategy,
     })
     .expect("JoinRoomResult serializable");
 
@@ -752,6 +754,7 @@ pub async fn handle_resume_session(
         quic_endpoint: state.datapath.endpoint.clone(),
         quic_fingerprint: state.datapath.fingerprint.clone(),
         room_type: room.room_type,
+        path_strategy: room.path_strategy,
     })
     .expect("ResumeSessionResult serializable");
 

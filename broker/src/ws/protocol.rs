@@ -228,6 +228,13 @@ pub struct CreateRoomResult {
     /// CreateRoomParams.room_type is None, broker default "l3"
     /// applies — UI should reflect that).
     pub room_type: String,
+    /// B4.7-supp/post-hotfix (2026-05-03): broker echoes the
+    /// resolved path_strategy so the client side can suppress P2P
+    /// punching when the room is `broker_only`. Joining clients
+    /// (JoinRoomResult below) get the same field so peers respect
+    /// the creator's intent without local override. Values:
+    /// "auto" | "p2p_only" | "broker_only".
+    pub path_strategy: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +252,8 @@ pub struct JoinRoomResult {
     /// route through the L2 helper path or refuse the join (macOS
     /// + L2 → D3.17 silent-downgrade rule).
     pub room_type: String,
+    /// B4.7-supp/post-hotfix (2026-05-03): see CreateRoomResult.
+    pub path_strategy: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -336,6 +345,11 @@ pub struct ResumeSessionResult {
     /// reattaching client can pick the right helper bridge (L2 vs
     /// L3) without a separate room_info round-trip.
     pub room_type: String,
+    /// B4.7-supp/post-hotfix (2026-05-03): same as
+    /// CreateRoomResult.path_strategy. Resume needs it too so a
+    /// reconnecting client re-establishes the same broker_only
+    /// suppression of P2P.
+    pub path_strategy: String,
 }
 
 #[derive(Debug, Serialize)]
